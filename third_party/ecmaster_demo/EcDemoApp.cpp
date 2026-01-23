@@ -44,8 +44,211 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fstream>
+#include <ctime>
+#include <sstream>
 
 /*-DEFINES-------------------------------------------------------------------*/
+#define CALIB_FILE_NAME "robot_calib.json"
+#define TOTAL_JOINTS 7
+
+/*-CALIBRATION DATA----------------------------------------------------------*/
+// 全局标定数据结构（所有参数从 JSON 文件读取）
+struct CalibData {
+    bool loaded;                        // 是否已加载标定数据
+    bool limits_written_to_drive;       // 软限位是否已写入驱动器
+    int total_joints;                   // 关节总数
+    float calib_positions[TOTAL_JOINTS]; // 标定时的编码器位置（负极限）
+    int directions[TOTAL_JOINTS];       // 方向 (0=正向, -1=负向)
+    float range_min[TOTAL_JOINTS];      // 运动范围最小值
+    float range_max[TOTAL_JOINTS];      // 运动范围最大值
+    float soft_limit_min[TOTAL_JOINTS];  // 软件限位最小值（计算得出）
+    float soft_limit_max[TOTAL_JOINTS];  // 软件限位最大值（计算得出）
+    char joint_names[TOTAL_JOINTS][32];  // 关节名称
+    char communication[TOTAL_JOINTS][32]; // 通讯方式
+};
+
+static CalibData g_CalibData = {false, false};
+
+// 将软限位写入驱动器的辅助函数
+static bool WriteSoftLimitsToDrive()
+{
+    if (!g_CalibData.loaded) {
+        printf("[限位] 错误: 标定数据未加载\n");
+        return false;
+    }
+    
+    printf("[限位] 正在将软限位写入驱动器...\n");
+    bool all_success = true;
+    
+    for (int i = 0; i < g_CalibData.total_joints; i++) {
+        EC_T_BOOL result = MT_SetDriveSoftLimits(
+            (EC_T_WORD)i,
+            (EC_T_LREAL)g_CalibData.soft_limit_min[i],
+            (EC_T_LREAL)g_CalibData.soft_limit_max[i]
+        );
+        
+        if (result) {
+            printf("  %s: [%.4f, %.4f] rad - OK\n", 
+                   g_CalibData.joint_names[i],
+                   g_CalibData.soft_limit_min[i],
+                   g_CalibData.soft_limit_max[i]);
+        } else {
+            printf("  %s: [%.4f, %.4f] rad - FAILED\n", 
+                   g_CalibData.joint_names[i],
+                   g_CalibData.soft_limit_min[i],
+                   g_CalibData.soft_limit_max[i]);
+            all_success = false;
+        }
+    }
+    
+    if (all_success) {
+        g_CalibData.limits_written_to_drive = true;
+        printf("[限位] 所有软限位已成功写入驱动器\n");
+    } else {
+        printf("[限位] 部分软限位写入失败\n");
+    }
+    
+    return all_success;
+}
+
+// 辅助函数：从 JSON 字符串中提取数值
+static float ParseJsonFloat(const std::string& content, size_t start_pos, const char* key)
+{
+    std::string search_key = std::string("\"") + key + "\":";
+    size_t pos = content.find(search_key, start_pos);
+    if (pos == std::string::npos) return 0.0f;
+    pos += search_key.length();
+    // 跳过空格
+    while (pos < content.length() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
+    size_t end = content.find_first_of(",}\n", pos);
+    return (float)atof(content.substr(pos, end - pos).c_str());
+}
+
+// 辅助函数：从 JSON 字符串中提取整数
+static int ParseJsonInt(const std::string& content, size_t start_pos, const char* key)
+{
+    std::string search_key = std::string("\"") + key + "\":";
+    size_t pos = content.find(search_key, start_pos);
+    if (pos == std::string::npos) return 0;
+    pos += search_key.length();
+    while (pos < content.length() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
+    size_t end = content.find_first_of(",}\n", pos);
+    return atoi(content.substr(pos, end - pos).c_str());
+}
+
+// 辅助函数：从 JSON 字符串中提取字符串值
+static void ParseJsonString(const std::string& content, size_t start_pos, const char* key, char* out, size_t out_size)
+{
+    std::string search_key = std::string("\"") + key + "\":";
+    size_t pos = content.find(search_key, start_pos);
+    if (pos == std::string::npos) { out[0] = '\0'; return; }
+    pos += search_key.length();
+    // 跳过空格和引号
+    while (pos < content.length() && (content[pos] == ' ' || content[pos] == '\t' || content[pos] == '"')) pos++;
+    size_t end = content.find('"', pos);
+    if (end == std::string::npos) { out[0] = '\0'; return; }
+    std::string value = content.substr(pos, end - pos);
+    strncpy(out, value.c_str(), out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+// JSON 解析函数：从文件读取所有标定参数
+static bool LoadCalibrationFile(const char* filename)
+{
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        printf("[标定] 警告: 无法打开标定文件 %s\n", filename);
+        return false;
+    }
+    
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+    file.close();
+    
+    // 读取关节总数
+    g_CalibData.total_joints = ParseJsonInt(content, 0, "total_joints");
+    if (g_CalibData.total_joints <= 0 || g_CalibData.total_joints > TOTAL_JOINTS) {
+        printf("[标定] 错误: 无效的关节总数 %d\n", g_CalibData.total_joints);
+        return false;
+    }
+    
+    printf("[标定] 关节总数: %d\n", g_CalibData.total_joints);
+    
+    // 解析每个关节的数据
+    for (int i = 0; i < g_CalibData.total_joints; i++) {
+        // 查找 "index": i+1 对应的关节块
+        char search_pattern[64];
+        snprintf(search_pattern, sizeof(search_pattern), "\"index\": %d", i + 1);
+        
+        size_t idx_pos = content.find(search_pattern);
+        if (idx_pos == std::string::npos) {
+            printf("[标定] 错误: 找不到关节 %d 的数据\n", i + 1);
+            return false;
+        }
+        
+        // 读取各字段
+        ParseJsonString(content, idx_pos, "name", g_CalibData.joint_names[i], 32);
+        ParseJsonString(content, idx_pos, "communication", g_CalibData.communication[i], 32);
+        g_CalibData.calib_positions[i] = ParseJsonFloat(content, idx_pos, "position");
+        g_CalibData.directions[i] = ParseJsonInt(content, idx_pos, "direction");
+        g_CalibData.range_min[i] = ParseJsonFloat(content, idx_pos, "range_min");
+        g_CalibData.range_max[i] = ParseJsonFloat(content, idx_pos, "range_max");
+        
+        // 计算软件限位
+        float total_range = g_CalibData.range_max[i] - g_CalibData.range_min[i];
+        if (g_CalibData.directions[i] == 0) {
+            // 正向关节：标定位置是最小值
+            g_CalibData.soft_limit_min[i] = g_CalibData.calib_positions[i];
+            g_CalibData.soft_limit_max[i] = g_CalibData.calib_positions[i] + total_range;
+        } else {
+            // 负向关节：标定位置是最大值
+            g_CalibData.soft_limit_max[i] = g_CalibData.calib_positions[i];
+            g_CalibData.soft_limit_min[i] = g_CalibData.calib_positions[i] - total_range;
+        }
+    }
+    
+    g_CalibData.loaded = true;
+    
+    printf("[标定] 已加载标定文件: %s\n", filename);
+    printf("[标定] 关节参数:\n");
+    for (int i = 0; i < g_CalibData.total_joints; i++) {
+        printf("  %s: pos=%.4f, dir=%d, range=[%.2f, %.2f], limit=[%.4f, %.4f]\n", 
+               g_CalibData.joint_names[i],
+               g_CalibData.calib_positions[i],
+               g_CalibData.directions[i],
+               g_CalibData.range_min[i],
+               g_CalibData.range_max[i],
+               g_CalibData.soft_limit_min[i], 
+               g_CalibData.soft_limit_max[i]);
+    }
+    
+    return true;
+}
+
+// 检查目标位置是否在软件限位范围内
+static bool CheckSoftLimit(int axis, float target_pos, float* clamped_pos = nullptr)
+{
+    if (!g_CalibData.loaded) {
+        return true;  // 未加载标定数据时不检查
+    }
+    
+    if (axis < 0 || axis >= TOTAL_JOINTS) {
+        return false;
+    }
+    
+    float min_limit = g_CalibData.soft_limit_min[axis];
+    float max_limit = g_CalibData.soft_limit_max[axis];
+    
+    if (target_pos < min_limit || target_pos > max_limit) {
+        printf("[限位] 错误: 轴 %d 目标位置 %.4f 超出限位范围 [%.4f, %.4f]\n",
+               axis + 1, target_pos, min_limit, max_limit);
+        return false;
+    }
+    
+    return true;
+}
 /* 下面 3 个宏用于应用层性能统计（PerfMeas）：给不同“工作段”一个编号 */
 #define PERF_myAppWorkpd       0
 #define PERF_DCM_Logfile       1
@@ -1432,6 +1635,13 @@ static void* CmdThread(void*)
 {
     char line[256];
 
+    /* [2026-01-22] 启动时自动加载标定文件 */
+    printf("\n[系统] 正在加载标定数据...\n");
+    if (!LoadCalibrationFile(CALIB_FILE_NAME)) {
+        printf("[系统] 提示: 未找到标定文件，请先运行 calib 命令进行标定\n");
+        printf("[系统] 标定完成后，home 命令才能正常使用\n\n");
+    }
+
     /* [2026-01-14] 目的：启动后先选择运行模式（0自动demo / 1手动命令） */
     printf("[CMD] 请选择模式: 0=自动demo  1=手动命令\n");
     printf("[CMD] 输入 0 或 1 后回车: ");
@@ -1465,6 +1675,9 @@ static void* CmdThread(void*)
     printf("  aging <axis> <speed>                        (启动老化往复测试)\n");
     printf("  stop <axis>                                 (安全停机/释放)\n");
     printf("  mode <0|1>                                  (0自动/1手动)\n");
+    printf("  calib                                       (标定：读取关节位置生成JSON)\n");
+    printf("  home                                        (回零：所有轴移动到零点)\n");
+    printf("  torque <axis> <tau> <kp> <q> <kd> <dq>       (阻抗控制/PT模式)\n");
     fflush(stdout);
 
     while (fgets(line, sizeof(line), stdin) != nullptr) {
@@ -1554,6 +1767,14 @@ static void* CmdThread(void*)
             int axis = 0;
             float speed = 0;
             if (sscanf(line + 6, "%d %f", &axis, &speed) == 2) {
+                // [2026-01-22] 检查是否已加载标定数据（aging 需要软件限位保护）
+                if (!g_CalibData.loaded) {
+                    printf("[CMD] 错误: 未加载标定数据，aging 命令需要软件限位保护\n");
+                    printf("[CMD] 请先运行 calib 命令进行标定\n");
+                    fflush(stdout);
+                    continue;
+                }
+                
                 MotorCmd_ cmd{};
                 cmd.mode = 99;    // 自动挂老化档
                 cmd.dq   = speed; // 设置运行速度
@@ -1561,11 +1782,255 @@ static void* CmdThread(void*)
                 cmd.kd   = 30.0f;
                 MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
                 printf("[CMD] OK: Start aging for Axis %d at speed %.3f rad/s\n", axis, speed);
+                printf("[CMD] 软件限位: [%.4f, %.4f] rad\n", 
+                       g_CalibData.soft_limit_min[axis - 1], 
+                       g_CalibData.soft_limit_max[axis - 1]);
             } else {
                 printf("[CMD] 用法: aging <1-7> <速度>\n");
             }
             continue;
         }
+        /* [2026-01-22] 扭矩控制命令：torque <axis> <tau> <kp> <q_des> <kd> <dq_des> */
+        if (strncmp(line, "torque ", 7) == 0) {
+            int axis = 0;
+            float tau = 0, kp = 0, q_des = 0, kd = 0, dq_des = 0;
+            if (sscanf(line + 7, "%d %f %f %f %f %f", &axis, &tau, &kp, &q_des, &kd, &dq_des) == 6) {
+                // 软件限位检查 (检查目标位置)
+                if (!CheckSoftLimit(axis - 1, q_des)) {
+                    printf("[CMD] 拒绝: 目标位置超出软件限位范围\n");
+                    fflush(stdout);
+                    continue;
+                }
+                
+                MotorCmd_ cmd{};
+                cmd.mode = 4;     // PT 模式
+                cmd.tau = tau;    // 前馈扭矩 (N·m)
+                cmd.kp = kp;      // 刚度系数
+                cmd.q = q_des;    // 目标位置 (rad)
+                cmd.kd = kd;      // 阻尼系数
+                cmd.dq = dq_des;  // 目标速度 (rad/s)
+                
+                MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
+                printf("[CMD] OK: Torque control axis=%d tau=%.3f kp=%.1f q=%.3f kd=%.1f dq=%.3f\n",
+                       axis, tau, kp, q_des, kd, dq_des);
+            } else {
+                printf("[CMD] 用法: torque <1-7> <tau> <kp> <q_des> <kd> <dq_des>\n");
+                printf("      tau: 前馈扭矩(N·m), kp: 刚度, q_des: 目标位置(rad)\n");
+                printf("      kd: 阻尼, dq_des: 目标速度(rad/s)\n");
+            }
+            fflush(stdout);
+            continue;
+        }
+        /* [2026-01-22] 标定命令：读取 7 个关节位置并生成 JSON 文件 */
+        if (strcmp(line, "calib") == 0) {
+            printf("\n[标定] ========================================\n");
+            printf("[标定] 请将 7 个关节手动反转到【负向极限】位置\n");
+            printf("[标定] 完成后输入 ok 确认: ");
+            fflush(stdout);
+            
+            char confirm[64];
+            if (fgets(confirm, sizeof(confirm), stdin) != nullptr) {
+                confirm[strcspn(confirm, "\r\n")] = 0;
+                if (strcmp(confirm, "ok") == 0) {
+                    printf("[标定] 正在读取关节位置...\n");
+                    
+                    // 7 个关节的固定参数 (URDF 命名)
+                    const char* joint_names[7] = {"arm_j1_l", "arm_j2_l", "arm_j3_l", "arm_j4_l", "arm_j5_l", "arm_j6_l", "arm_j7_l"};
+                    const int directions[7] = {0, 0, 0, -1, -1, -1, -1};  // 0=正向, -1=负向
+                    const float range_min[7] = {-3.53f, -1.78f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f};
+                    const float range_max[7] = { 1.43f,  0.91f,  0.82f,  0.30f,  1.61f,  0.35f,  1.61f};
+                    const int total_joints = 7;
+                    
+                    // 读取实际位置
+                    float positions[7];
+                    for (int i = 0; i < total_joints; i++) {
+                        MotorState_ st;
+                        if (MT_GetMotorState((EC_T_WORD)i, &st)) {
+                            positions[i] = st.q_fb;
+                            printf("[标定] %s: %.4f rad\n", joint_names[i], positions[i]);
+                        } else {
+                            positions[i] = 0.0f;
+                            printf("[标定] %s: 读取失败，使用 0.0\n", joint_names[i]);
+                        }
+                    }
+                    
+                    // 生成 JSON 文件
+                    std::ofstream json("robot_calib.json");
+                    if (json.is_open()) {
+                        // 获取当前时间
+                        time_t now = time(nullptr);
+                        char timebuf[64];
+                        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+                        
+                        json << "{\n";
+                        json << "  \"robot_calibration\": {\n";
+                        json << "    \"total_joints\": " << total_joints << ",\n";
+                        json << "    \"timestamp\": \"" << timebuf << "\",\n";
+                        json << "    \"joints\": [\n";
+                        
+                        for (int i = 0; i < total_joints; i++) {
+                            json << "      {\n";
+                            json << "        \"index\": " << (i + 1) << ",\n";
+                            json << "        \"name\": \"" << joint_names[i] << "\",\n";
+                            json << "        \"communication\": \"EtherCAT\",\n";
+                            json << "        \"position\": " << positions[i] << ",\n";
+                            json << "        \"direction\": " << directions[i] << ",\n";
+                            json << "        \"range_min\": " << range_min[i] << ",\n";
+                            json << "        \"range_max\": " << range_max[i] << "\n";
+                            json << "      }" << (i < total_joints - 1 ? "," : "") << "\n";
+                        }
+                        
+                        json << "    ]\n";
+                        json << "  }\n";
+                        json << "}\n";
+                        json.close();
+                        printf("[标定] 已生成配置文件: %s\n", CALIB_FILE_NAME);
+                        
+                        // [2026-01-22] 生成后自动加载标定数据
+                        printf("[标定] 正在加载标定数据...\n");
+                        if (LoadCalibrationFile(CALIB_FILE_NAME)) {
+                            printf("[标定] 标定数据已加载\n");
+                            
+                            // [2026-01-22] 将软限位写入驱动器
+                            WriteSoftLimitsToDrive();
+                            
+                            printf("[标定] 现在可以使用 home 命令回零\n");
+                        }
+                    } else {
+                        printf("[标定] 错误: 无法创建文件 %s\n", CALIB_FILE_NAME);
+                    }
+                } else {
+                    printf("[标定] 已取消\n");
+                }
+            }
+            printf("[标定] ========================================\n\n");
+            fflush(stdout);
+            continue;
+        }
+
+        /* [2026-01-22] 回零命令：根据标定文件将所有关节移动到零点位置 */
+        if (strcmp(line, "home") == 0) {
+            printf("\n[回零] ========================================\n");
+            
+            // 检查是否已加载标定数据
+            if (!g_CalibData.loaded) {
+                printf("[回零] 错误: 未加载标定数据！\n");
+                printf("[回零] 请先运行 calib 命令进行标定，或确保 %s 文件存在\n", CALIB_FILE_NAME);
+                printf("[回零] ========================================\n\n");
+                fflush(stdout);
+                continue;
+            }
+            
+            // [2026-01-22] 检查软限位是否已写入驱动器，如果没有则写入
+            if (!g_CalibData.limits_written_to_drive) {
+                printf("[回零] 软限位尚未写入驱动器，正在写入...\n");
+                WriteSoftLimitsToDrive();
+            }
+            
+            // 使用已加载的标定数据计算零点位置
+            float zero_positions[TOTAL_JOINTS];
+            printf("[回零] 使用标定数据计算零点位置...\n");
+            for (int i = 0; i < g_CalibData.total_joints; i++) {
+                float offset = -g_CalibData.range_min[i];  // |range_min|
+                if (g_CalibData.directions[i] == 0) {
+                    // 正向关节：零点 = 标定位置 + |range_min|
+                    zero_positions[i] = g_CalibData.calib_positions[i] + offset;
+                } else {
+                    // 负向关节：零点 = 标定位置 - |range_min|
+                    zero_positions[i] = g_CalibData.calib_positions[i] - offset;
+                }
+                printf("  %s: 标定=%.4f, 零点=%.4f (dir=%d)\n", 
+                       g_CalibData.joint_names[i], g_CalibData.calib_positions[i], zero_positions[i], g_CalibData.directions[i]);
+            }
+            
+            printf("\n[回零] 开始回零，顺序：%d→...→1\n", g_CalibData.total_joints);
+            printf("[回零] 速度: 0.5 rad/s\n");
+            printf("[回零] 按回车开始，或输入 cancel 取消: ");
+            fflush(stdout);
+            
+            char confirm[64];
+            if (fgets(confirm, sizeof(confirm), stdin) != nullptr) {
+                confirm[strcspn(confirm, "\r\n")] = 0;
+                if (strcmp(confirm, "cancel") == 0) {
+                    printf("[回零] 已取消\n");
+                } else {
+                    // 从最后一个轴到第 1 个轴逐个回零
+                    for (int i = g_CalibData.total_joints - 1; i >= 0; i--) {
+                        int axis_num = i + 1;  // 显示用的轴号 1-7
+                        printf("\n[回零] >>> 轴 %d (%s) 开始回零...\n", axis_num, g_CalibData.joint_names[i]);
+                        
+                        // 1. 先使能电机
+                        MotorCmd_ cmd{};
+                        MotorState_ st;
+                        MT_GetMotorState((EC_T_WORD)i, &st);
+                        cmd.q = st.q_fb;  // 先同步到当前位置
+                        cmd.kp = 32.0f;
+                        cmd.kd = 30.0f;
+                        cmd.mode = 8;  // 位置模式
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                        OsSleep(500);  // 等待使能稳定
+                        
+                        // 2. 设置目标位置为零点
+                        cmd.q = zero_positions[i];
+                        cmd.dq = 0.5f;  // 固定速度 0.5 rad/s
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                        
+                        // 3. 等待到达目标位置
+                        float target = zero_positions[i];
+                        int timeout = 30000;  // 最长等待 30 秒
+                        int elapsed = 0;
+                        float last_pos = st.q_fb;
+                        int stuck_count = 0;  // 卡住计数器
+                        
+                        while (elapsed < timeout) {
+                            OsSleep(100);
+                            elapsed += 100;
+                            MT_GetMotorState((EC_T_WORD)i, &st);
+                            float error = st.q_fb - target;
+                            if (error < 0) error = -error;  // 取绝对值
+                            
+                            // 每秒打印一次进度
+                            if (elapsed % 1000 == 0) {
+                                printf("  [轴%d] 当前: %.4f, 目标: %.4f, 误差: %.4f\n", 
+                                       axis_num, st.q_fb, target, error);
+                            }
+                            
+                            // 误差小于 0.05 rad 认为到达（放宽阈值，约 2.9°）
+                            if (error < 0.05f) {
+                                printf("  [轴%d] ✓ 已到达零点位置: %.4f rad (误差: %.4f)\n", axis_num, st.q_fb, error);
+                                break;
+                            }
+                            
+                            // 检测是否卡住（位置 3 秒没变化）
+                            float pos_change = st.q_fb - last_pos;
+                            if (pos_change < 0) pos_change = -pos_change;
+                            if (pos_change < 0.001f) {
+                                stuck_count++;
+                                if (stuck_count >= 30) {  // 3 秒没动
+                                    printf("  [轴%d] ⚠ 电机卡住，当前: %.4f, 目标: %.4f, 误差: %.4f\n", 
+                                           axis_num, st.q_fb, target, error);
+                                    break;
+                                }
+                            } else {
+                                stuck_count = 0;
+                                last_pos = st.q_fb;
+                            }
+                        }
+                        
+                        if (elapsed >= timeout) {
+                            printf("  [轴%d] ✗ 超时，当前位置: %.4f\n", axis_num, st.q_fb);
+                        }
+                    }
+                    
+                    printf("\n[回零] ========================================\n");
+                    printf("[回零] 回零完成！所有轴保持在零点位置。\n");
+                }
+            }
+            printf("[回零] ========================================\n\n");
+            fflush(stdout);
+            continue;
+        }
+
         if (strncmp(line, "disable ", 8) == 0) {
             int axis = 0;
             if (sscanf(line + 8, "%d", &axis) == 1) {
@@ -1584,6 +2049,13 @@ static void* CmdThread(void*)
             // 按顺序解析：轴, 模式, 位置, 速度, 扭矩, KP, KD
             int num = sscanf(line + 4, "%d %d %f %f %f %f %f", &axis, &mode, &q, &dq, &tau, &kp, &kd);
             if (num >= 4) {
+                // [2026-01-22] 软件限位检查
+                if (!CheckSoftLimit(axis - 1, q)) {
+                    printf("[CMD] 拒绝: 目标位置超出软件限位范围\n");
+                    fflush(stdout);
+                    continue;
+                }
+                
                 MotorCmd_ cmd{};
                 // 默认值保护：如果没输入 KP/KD (num < 6)，则使用安全默认值
                 // 这样可以防止 set 命令意外地把电机力量设为 0

@@ -118,6 +118,8 @@ typedef struct _MotorState_
 #define DRV_OBJ_MOTOR_TEMPERATURE           0x3009
 #define DRV_OBJ_IGBT_TEMPERATURE            0x300F
 #define DRV_OBJ_DC_LINK_VOLTAGE             0x300B
+#define DRV_OBJ_GEAR_RATIO                  0x3D06  /* PrD.06 减速比 索引 0x3D06*/
+
 
 #define DRV_OBJ_DIGITAL_INPUT               0x6000
 #define DRV_OBJ_DIGITAL_INPUT_SUBINDEX_1    0x1
@@ -324,6 +326,7 @@ typedef struct _Motor_Type
 	/* [2026-01-13] 作用：把上层 rad/rad/s 与驱动对象的 PUU(count)/PUU/s 对齐 */
 	EC_T_LREAL  fCntPerRad;           /* PUU(count)/rad：q(rad) * fCntPerRad -> 0x607A int32 */
 	EC_T_LREAL  fRadPerCnt;           /* rad/PUU(count)：q_cnt * fRadPerCnt -> q_fb(rad) */
+	EC_T_LREAL  fGearRatio;           /* [2026-01-21] 从 SDO 0x3D06 读取的减速比 */
 
 	MC_T_CIA402_STATE   wReqState;
 	MC_T_CIA402_STATE   wActState;
@@ -337,6 +340,8 @@ typedef struct _Motor_Type
     EC_T_LREAL          fLimitMin;    /* [2026-01-20] 软件左限位 */
     EC_T_LREAL          fLimitMax;    /* [2026-01-20] 软件右限位 */
     EC_T_BOOL           bLimitValid;  /* 限位是否已示教有效 */
+    /*-扭矩控制 (PT模式)--------------------------------------------------------*/
+    EC_T_LREAL  fRatedTorque;         /* 额定扭矩 (N·m)，从 0x6076 读取 */
 } My_Motor_Type;
 
 /* 一个 slave（按固定站地址）对应多少轴（wAxisCnt） */
@@ -385,6 +390,12 @@ EC_T_VOID  MT_TeachLimit(EC_T_WORD wAxis, EC_T_BOOL bIsMax);
  *   dq_cnt = dq_rad * cnt_per_rad
  */
 EC_T_BOOL  MT_SetAxisUnitScale(EC_T_WORD wAxis, EC_T_LREAL encoder_cpr, EC_T_LREAL gear_ratio);
+
+/* [2026-01-22] 设置驱动器内置软限位
+ * 通过 SDO 写入 0x607D:1 (最小限位) 和 0x607D:2 (最大限位)
+ * 参数单位：弧度 (rad)，函数内部自动转换为编码器计数 (PUU)
+ */
+EC_T_BOOL  MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_LREAL fMaxLimitRad);
 
 #endif /* INC_MOTROTECH */
 /*-END OF SOURCE FILE--------------------------------------------------------*/

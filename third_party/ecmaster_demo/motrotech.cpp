@@ -185,8 +185,7 @@ EC_T_DWORD MT_Init(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     S_MotorCmd[dwIndex].kd = 30.0f;
     S_MotorCmd[dwIndex].mode = 0; // [2026-01-20] 安全：初始设为 Shutdown 模式，防止开机乱动
   }
-  /* [2026-01-14] 目的：给轴0设置默认单位换算（避免每次手动 scale） */
-  MT_SetAxisUnitScale(0, 131072, 9.0);
+  /* [2026-01-21] 删除硬编码，改为在 MT_Prepare() 从 SDO 读取减速比 */
 
   return EC_E_NOERROR;
 }
@@ -278,11 +277,7 @@ EC_T_DWORD MT_Prepare(T_EC_DEMO_APP_CONTEXT *pAppContext) {
    */
   EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
                                "Motrotech: (%d) Axises have find", MotorCount));
-  /* [2026-01-14] 目的：按实际轴数批量设置默认单位换算（避免每次手动 scale） */
-  for (EC_T_INT i = 0; i < MotorCount; i++)
-  {
-      MT_SetAxisUnitScale((EC_T_WORD)i, 131072, 9.0);
-  }
+  /* [2026-01-21] 注意：SDO 读取移到 MT_Setup()，因为 MT_Prepare() 在 INIT 状态调用，SDO 不可用 */
   return EC_E_NOERROR;
 }
 
@@ -739,6 +734,49 @@ EC_T_DWORD MT_Setup(T_EC_DEMO_APP_CONTEXT *pAppContext) {
    */
   fTimeSec = (EC_T_LREAL)pAppContext->AppParms.dwBusCycleTimeUsec / 1000000;
 
+  /* [2026-01-21] 从 SDO 0x3D06 读取每轴减速比（必须在 PREOP 之后才能 SDO 通信）
+   * 编码器固定 17 位 (131072)
+   */
+  const EC_T_LREAL fEncoderCpr = 131072.0;  /* 17 位编码器，固定值 */
+  
+  for (EC_T_INT i = 0; i < MotorCount; i++)
+  {
+      EC_T_DWORD dwSlaveId = ecatGetSlaveId(My_Motor[i].wStationAddress);
+      EC_T_DWORD dwBytesRead = 0;
+      
+      /* 读取减速比 0x3D06 (PrD.06) */
+      EC_T_DWORD dwGearRatioRaw = 0;
+      EC_T_DWORD dwRes = ecatCoeSdoUpload(dwSlaveId, DRV_OBJ_GEAR_RATIO, 0, 
+          (EC_T_BYTE*)&dwGearRatioRaw, sizeof(dwGearRatioRaw), &dwBytesRead, 3000, 0);
+      
+      EC_T_LREAL fGearRatio = 81.0;  /* 默认值（读取失败时使用） */
+      if (dwRes == EC_E_NOERROR && dwBytesRead > 0) {
+          fGearRatio = (EC_T_LREAL)dwGearRatioRaw;
+          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, 
+              "Axis[%d] GearRatio from SDO 0x3D06 = %d\n", i, (EC_T_INT)dwGearRatioRaw));
+      } else {
+          EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING, 
+              "Axis[%d] Read GearRatio(0x3D06) failed (0x%x), using default 81\n", i, dwRes));
+      }
+      My_Motor[i].fGearRatio = fGearRatio;
+      /* 计算单位换算系数 */
+      MT_SetAxisUnitScale((EC_T_WORD)i, fEncoderCpr, fGearRatio);
+
+      // [2026-01-22] 读取额定扭矩 0x6076
+      EC_T_DWORD dwRatedTorqueRaw = 0;
+      dwRes = ecatCoeSdoUpload(dwSlaveId, 0x6076, 0,
+          (EC_T_BYTE*)&dwRatedTorqueRaw, sizeof(dwRatedTorqueRaw), &dwBytesRead, 3000, 0);
+      if (dwRes == EC_E_NOERROR && dwRatedTorqueRaw > 0) {
+          My_Motor[i].fRatedTorque = (EC_T_LREAL)dwRatedTorqueRaw * 0.001;  // 0.001 N·m 单位
+          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+              "Axis[%d] Rated Torque = %.3f N·m\n", i, My_Motor[i].fRatedTorque));
+      } else {
+          My_Motor[i].fRatedTorque = 1.0;  // 默认 1 N·m，避免除零
+          EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
+              "Axis[%d] Failed to read rated torque, using default 1.0 N·m\n", i));
+      }
+  }
+
   return EC_E_NOERROR;
 }
 
@@ -937,6 +975,43 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
         *pDemoAxis->pbyModeOfOperation = 8; // 告诉驱动器继续跑在位置模式
       }
     }
+    // [2026-01-22] PT 模式 (mode=4): 阻抗控制
+    // τ_cmd = τ_ff + kp * (q_des - q_fb) + kd * (dq_des - dq_fb)
+    else if ((S_RunMode == MT_RUNMODE_MANUAL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) && bHaveCmd && (cmd.mode == 4)) {
+      // 读取当前位置和速度
+      MotorState_ *pState = &S_MotorState[i];
+      EC_T_LREAL q_fb = pState->q_fb;
+      EC_T_LREAL dq_fb = pState->dq_fb;
+      
+      // 从命令获取参数
+      EC_T_LREAL tau_ff = cmd.tau;      // 前馈扭矩 (N·m)
+      EC_T_LREAL kp = cmd.kp;           // 刚度系数
+      EC_T_LREAL kd = cmd.kd;           // 阻尼系数
+      EC_T_LREAL q_des = cmd.q;         // 目标位置 (rad)
+      EC_T_LREAL dq_des = cmd.dq;       // 目标速度 (rad/s)
+      
+      // 计算阻抗控制扭矩
+      EC_T_LREAL tau_cmd = tau_ff + kp * (q_des - q_fb) + kd * (dq_des - dq_fb);
+      
+      // 转换为 0.1% 额定扭矩单位
+      EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque;
+      if (fRatedTorque <= 0.0) fRatedTorque = 1.0;
+      EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
+      
+      // 限幅 ±3000 (±300% 额定扭矩)
+      if (tau_permille > 3000.0) tau_permille = 3000.0;
+      if (tau_permille < -3000.0) tau_permille = -3000.0;
+      
+      // 写入 0x6071
+      if (pDemoAxis->pwTargetTorque != EC_NULL) {
+          EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+      }
+      
+      // 设置模式为 PT (4)
+      if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+          *pDemoAxis->pbyModeOfOperation = 4;
+      }
+    }
     else if ((S_RunMode == MT_RUNMODE_MANUAL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) && bHaveCmd && (cmd.mode != 0)) {
       
       /* [新增] 同步初始位置：如果刚进入使能状态，将当前反馈位置作为平滑移动的起点 */
@@ -1106,6 +1181,8 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
         EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
       }
     }
+
+
   } /* loop through axis list */
 }
 
@@ -1477,6 +1554,96 @@ static EC_T_VOID CheckMotorStateStop(EC_T_VOID) {
       OsSleep(1);
   } while ((MovingStop != 0) && !oTimeout.IsElapsed());
 }
+/*-----------------------------------------------------------------------------
+ * [2026-01-22] MT_SetDriveSoftLimits
+ *   设置驱动器内置软限位，通过 SDO 写入 0x607D:1 (最小限位) 和 0x607D:2 (最大限位)
+ *   参数单位：弧度 (rad)，函数内部自动转换为编码器计数 (PUU)
+ *---------------------------------------------------------------------------*/
+#define DRV_OBJ_SOFTWARE_POSITION_LIMIT 0x607D
+#define SDO_TIMEOUT 5000
+
+EC_T_BOOL MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_LREAL fMaxLimitRad)
+{
+    if (wAxis >= MotorCount) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetDriveSoftLimits: Invalid axis %d (max=%d)\n", wAxis, MotorCount - 1));
+        return EC_FALSE;
+    }
+    
+    My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
+    if (pDemoAxis->wStationAddress == 0) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetDriveSoftLimits: Axis %d has no valid station address\n", wAxis));
+        return EC_FALSE;
+    }
+    
+    // 获取单位换算系数
+    EC_T_LREAL fCntPerRad = pDemoAxis->fCntPerRad;
+    if (fCntPerRad <= 0.0) {
+        // 使用默认值：17-bit 编码器 (131072) * 减速比 81 / (2*PI)
+        fCntPerRad = 131072.0 * 81.0 / (2.0 * MT_PI);
+        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
+            "MT_SetDriveSoftLimits: Axis %d using default fCntPerRad=%.2f\n", wAxis, fCntPerRad));
+    }
+    
+    // 将弧度转换为编码器计数 (PUU)
+    EC_T_INT nMinLimitPuu = MtSatToInt32(fMinLimitRad * fCntPerRad);
+    EC_T_INT nMaxLimitPuu = MtSatToInt32(fMaxLimitRad * fCntPerRad);
+    
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Setting soft limits: min=%.4f rad (%d PUU), max=%.4f rad (%d PUU)\n",
+        wAxis, fMinLimitRad, nMinLimitPuu, fMaxLimitRad, nMaxLimitPuu));
+    
+    EC_T_DWORD dwRes;
+    EC_T_DWORD dwDataLen = sizeof(EC_T_INT);
+    
+    // 获取 slave ID（通过站地址查找）
+    EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+    if (dwSlaveId == INVALID_SLAVE_ID) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetDriveSoftLimits: Axis %d - cannot find slave with address %d\n", 
+            wAxis, pDemoAxis->wStationAddress));
+        return EC_FALSE;
+    }
+    
+    // 写入最小限位 (0x607D:1)
+    dwRes = ecatCoeSdoDownload(
+        dwSlaveId,
+        DRV_OBJ_SOFTWARE_POSITION_LIMIT,
+        1,  // subindex 1 = min position limit
+        (EC_T_BYTE*)&nMinLimitPuu,
+        dwDataLen,
+        SDO_TIMEOUT,
+        0
+    );
+    if (dwRes != EC_E_NOERROR) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "Axis[%d] Failed to set min soft limit (0x607D:1): 0x%08X\n", wAxis, dwRes));
+        return EC_FALSE;
+    }
+    
+    // 写入最大限位 (0x607D:2)
+    dwRes = ecatCoeSdoDownload(
+        dwSlaveId,
+        DRV_OBJ_SOFTWARE_POSITION_LIMIT,
+        2,  // subindex 2 = max position limit
+        (EC_T_BYTE*)&nMaxLimitPuu,
+        dwDataLen,
+        SDO_TIMEOUT,
+        0
+    );
+    if (dwRes != EC_E_NOERROR) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "Axis[%d] Failed to set max soft limit (0x607D:2): 0x%08X\n", wAxis, dwRes));
+        return EC_FALSE;
+    }
+    
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Soft limits set successfully\n", wAxis));
+    
+    return EC_TRUE;
+}
+
 /*--------------------------------------------------------------------------------END
  * OF SOURCE
  * FILE----------------------------------------------------------------------*/

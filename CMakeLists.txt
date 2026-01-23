@@ -41,7 +41,7 @@ FetchContent_Declare(yaml-cpp
 FetchContent_MakeAvailable(yaml-cpp)
 # add dependence library tiny_framework
 FetchContent_Declare(tiny_framework
-    GIT_REPOSITORY https://github.com/New-Stark-Industries/tiny_framework.git
+    GIT_REPOSITORY git@github.com:New-Stark-Industries/tiny_framework.git
     GIT_TAG master)
 FetchContent_MakeAvailable(tiny_framework)
 
