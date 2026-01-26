@@ -131,8 +131,8 @@ static MotorState_         S_MotorState[MAX_AXIS_NUM];
 /* 总线周期时间（秒），在 MT_Setup() 里由 dwBusCycleTimeUsec 计算出来 */
 static EC_T_LREAL fTimeSec = 0.0000;
 
-/* [2026-01-14] 目的：运行模式开关（默认自动，保持原demo行为） */
-static MT_RUN_MODE S_RunMode = MT_RUNMODE_AUTO;
+/* [2026-01-23] 全局驱动模式（所有轴共用，默认 CSP） */
+static DriveMode S_GlobalDriveMode = DRIVE_MODE_CSP;
 
 /*-FUNCTION DEFINITIONS------------------------------------------------------*/
 
@@ -183,7 +183,7 @@ EC_T_DWORD MT_Init(T_EC_DEMO_APP_CONTEXT *pAppContext) {
      */
     S_MotorCmd[dwIndex].kp = 32.0f;
     S_MotorCmd[dwIndex].kd = 30.0f;
-    S_MotorCmd[dwIndex].mode = 0; // [2026-01-20] 安全：初始设为 Shutdown 模式，防止开机乱动
+    S_MotorCmd[dwIndex].motion_func = MOTION_IDLE; // [2026-01-23] 安全：初始设为 IDLE 模式
   }
   /* [2026-01-21] 删除硬编码，改为在 MT_Prepare() 从 SDO 读取减速比 */
 
@@ -844,14 +844,11 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
    * - MANUAL：按 MotorCmd_.mode 决定 start/shutdown
    */
   for (EC_T_INT i = 0; i < MotorCount; i++) {
-    if (S_RunMode == MT_RUNMODE_AUTO) {
-      S_ProcessState[i] = COMMAND_START;
-    } else {
-      if (S_MotorCmdValid[i]) {
-        S_ProcessState[i] = (S_MotorCmd[i].mode == 0) ? COMMAND_SHUTDOWN : COMMAND_START;
-      }
-      /* 没有效cmd：不改S_ProcessState，维持上一次状态 */
+    /* [2026-01-23] 根据 motion_func 决定状态机命令 */
+    if (S_MotorCmdValid[i]) {
+      S_ProcessState[i] = (S_MotorCmd[i].motion_func == MOTION_SHUTDOWN) ? COMMAND_SHUTDOWN : COMMAND_START;
     }
+    /* 没有效cmd：不改S_ProcessState，维持上一次状态 */
   }
 
   /* 【每周期的第二步：跑 CiA402 状态机】
@@ -935,21 +932,28 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
         bFirstEnable[i] = EC_FALSE; // 未使能时，重置同步标记
     }
 
-    /* [2026-01-20] 老化测试逻辑：当 mode == 99 时进入自动往复 */
-    static EC_T_INT nDirection[MAX_AXIS_NUM] = { 1 }; // 1: 正向, -1: 反向
-    if ((S_RunMode == MT_RUNMODE_MANUAL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) && bHaveCmd && (cmd.mode == 99)) {
+    /* [2026-01-23] 重构：基于 motion_func 和 drive_mode 的控制逻辑 */
+    static EC_T_INT nDirection[MAX_AXIS_NUM] = { 1 }; // 老化用：1=正向, -1=反向
+    
+    /* ===== MOTION_SHUTDOWN: 停机/释放 ===== */
+    if (bHaveCmd && (cmd.motion_func == MOTION_SHUTDOWN)) {
+      // motion_func == SHUTDOWN 会触发状态机退出 OP_ENABLED
+      // 不做任何控制输出
+    }
+    /* ===== MOTION_AGING: 老化测试 ===== */
+    else if (bHaveCmd && (cmd.motion_func == MOTION_AGING) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
       if (!bFirstEnable[i]) {
           pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
           bFirstEnable[i] = EC_TRUE;
       }
 
-      // 如果已经示教过，则使用示教限位；否则使用 cmd 传进来的范围
+      // 获取限位范围
       EC_T_LREAL fMinLimit, fMaxLimit;
       if (pDemoAxis->bLimitValid) {
           fMinLimit = pDemoAxis->fLimitMin;
           fMaxLimit = pDemoAxis->fLimitMax;
       } else {
-          EC_T_LREAL fRange = (cmd.q > 0) ? (EC_T_LREAL)cmd.q : 5.0;
+          EC_T_LREAL fRange = (cmd.range > 0) ? (EC_T_LREAL)cmd.range : 5.0;
           fMinLimit = -fRange;
           fMaxLimit = fRange;
       }
@@ -966,119 +970,121 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
 
       pDemoAxis->fCurPos += (nDirection[i] * fMaxStep);
 
-      // [修复] 将计算出的老化位置写入电机 PDO (0x607A)
-      if (pDemoAxis->pnTargetPosition != EC_NULL) {
-        const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
-        EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
-      }
-      if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-        *pDemoAxis->pbyModeOfOperation = 8; // 告诉驱动器继续跑在位置模式
-      }
-    }
-    // [2026-01-22] PT 模式 (mode=4): 阻抗控制
-    // τ_cmd = τ_ff + kp * (q_des - q_fb) + kd * (dq_des - dq_fb)
-    else if ((S_RunMode == MT_RUNMODE_MANUAL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) && bHaveCmd && (cmd.mode == 4)) {
-      // 读取当前位置和速度
-      MotorState_ *pState = &S_MotorState[i];
-      EC_T_LREAL q_fb = pState->q_fb;
-      EC_T_LREAL dq_fb = pState->dq_fb;
-      
-      // 从命令获取参数
-      EC_T_LREAL tau_ff = cmd.tau;      // 前馈扭矩 (N·m)
-      EC_T_LREAL kp = cmd.kp;           // 刚度系数
-      EC_T_LREAL kd = cmd.kd;           // 阻尼系数
-      EC_T_LREAL q_des = cmd.q;         // 目标位置 (rad)
-      EC_T_LREAL dq_des = cmd.dq;       // 目标速度 (rad/s)
-      
-      // 计算阻抗控制扭矩
-      EC_T_LREAL tau_cmd = tau_ff + kp * (q_des - q_fb) + kd * (dq_des - dq_fb);
-      
-      // 转换为 0.1% 额定扭矩单位
-      EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque;
-      if (fRatedTorque <= 0.0) fRatedTorque = 1.0;
-      EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
-      
-      // 限幅 ±3000 (±300% 额定扭矩)
-      if (tau_permille > 3000.0) tau_permille = 3000.0;
-      if (tau_permille < -3000.0) tau_permille = -3000.0;
-      
-      // 写入 0x6071
-      if (pDemoAxis->pwTargetTorque != EC_NULL) {
-          EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
-      }
-      
-      // 设置模式为 PT (4)
-      if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-          *pDemoAxis->pbyModeOfOperation = 4;
+      // 根据 drive_mode 写入 PDO
+      if (cmd.drive_mode == DRIVE_MODE_PT) {
+        // PT 模式老化：用阻抗控制
+        MotorState_ *pState = &S_MotorState[i];
+        EC_T_LREAL tau_cmd = cmd.kp * (pDemoAxis->fCurPos - pState->q_fb) + cmd.kd * (0 - pState->dq_fb);
+        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+        EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
+        if (tau_permille > 3000.0) tau_permille = 3000.0;
+        if (tau_permille < -3000.0) tau_permille = -3000.0;
+        if (pDemoAxis->pwTargetTorque != EC_NULL) {
+            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+        }
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
+        }
+      } else {
+        // CSP/CST 模式老化：用位置控制
+        if (pDemoAxis->pnTargetPosition != EC_NULL) {
+          const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
+          EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+        }
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
+        }
       }
     }
-    else if ((S_RunMode == MT_RUNMODE_MANUAL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) && bHaveCmd && (cmd.mode != 0)) {
-      
-      /* [新增] 同步初始位置：如果刚进入使能状态，将当前反馈位置作为平滑移动的起点 */
+    /* ===== MOTION_CONTROL: 正常控制（PT/CSP/CST）===== */
+    else if (bHaveCmd && (cmd.motion_func == MOTION_CONTROL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
+      // 同步初始位置
       if (!bFirstEnable[i]) {
           pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
           bFirstEnable[i] = EC_TRUE;
-          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "Axis %d: Position Synchronized to %d (x1000)\n", i, (EC_T_INT)(pDemoAxis->fCurPos*1000)));
+          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "Axis %d: Position Sync to %d (x1000)\n", i, (EC_T_INT)(pDemoAxis->fCurPos*1000)));
       }
 
-      // 1. 获取目标位置 (rad)
-      EC_T_LREAL fTargetQ = (EC_T_LREAL)cmd.q;
-      // 2. 获取设定的最大速度 (rad/s)，如果没有设置 dq，默认给一个安全速度（如 1.0 rad/s）
-      EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0; 
-      
-      // 3. 计算本周期允许移动的最大位移 (rad) = 速度 * 周期
-      EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
+      /* --- 根据 drive_mode 执行不同控制 --- */
+      if (cmd.drive_mode == DRIVE_MODE_PT) {
+        // PT 模式：阻抗控制 τ = τ_ff + kp*(q_des-q_fb) + kd*(dq_des-dq_fb)
+        MotorState_ *pState = &S_MotorState[i];
+        EC_T_LREAL q_fb = pState->q_fb;
+        EC_T_LREAL dq_fb = pState->dq_fb;
+        EC_T_LREAL tau_cmd = cmd.tau + cmd.kp * (cmd.q - q_fb) + cmd.kd * (cmd.dq - dq_fb);
+        
+        
+        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+        EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
+        if (tau_permille > 3000.0) tau_permille = 3000.0;
+        if (tau_permille < -3000.0) tau_permille = -3000.0;
+        
+        if (pDemoAxis->pwTargetTorque != EC_NULL) {
+            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+        }
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
+        }
+      }
+      else if (cmd.drive_mode == DRIVE_MODE_CSP) {
+        // CSP 模式：平滑位置控制
+        EC_T_LREAL fTargetQ = (EC_T_LREAL)cmd.q;
+        EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0; 
+        EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
 
-      // 4. 平滑更新当前内部位置 fCurPos
-      EC_T_LREAL fDiff = fTargetQ - pDemoAxis->fCurPos;
-      if (fDiff > fMaxStep) {
-          pDemoAxis->fCurPos += fMaxStep; // 正向限速
-      } else if (fDiff < -fMaxStep) {
-          pDemoAxis->fCurPos -= fMaxStep; // 反向限速
-      } else {
-          pDemoAxis->fCurPos = fTargetQ;  // 到达目标
-      }
+        EC_T_LREAL fDiff = fTargetQ - pDemoAxis->fCurPos;
+        if (fDiff > fMaxStep) {
+            pDemoAxis->fCurPos += fMaxStep;
+        } else if (fDiff < -fMaxStep) {
+            pDemoAxis->fCurPos -= fMaxStep;
+        } else {
+            pDemoAxis->fCurPos = fTargetQ;
+        }
 
-      // 5. 将平滑后的位置写入 PDO (0x607A)
-      if (pDemoAxis->pnTargetPosition != EC_NULL) {
-        const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
-        EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+        if (pDemoAxis->pnTargetPosition != EC_NULL) {
+          const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
+          EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+        }
+        if (pDemoAxis->pnVelocityOffset != EC_NULL) {
+          const EC_T_LREAL dq_cnt = (EC_T_LREAL)cmd.dq * pDemoAxis->fCntPerRad;
+          EC_SETDWORD(pDemoAxis->pnVelocityOffset, MtSatToInt32(dq_cnt));
+        }
+        if (pDemoAxis->pwTorqueOffset != EC_NULL) {
+          const EC_T_SWORD tau_raw = (EC_T_SWORD)(cmd.tau * 1000.0f);
+          EC_SETWORD(pDemoAxis->pwTorqueOffset, tau_raw);
+        }
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
+        }
       }
-      
-      // 6. 速度偏移 (0x60B1) - 手动模式下通常作为辅助
-      if (pDemoAxis->pnVelocityOffset != EC_NULL) {
-        const EC_T_LREAL dq_cnt = (EC_T_LREAL)cmd.dq * pDemoAxis->fCntPerRad;
-        EC_SETDWORD(pDemoAxis->pnVelocityOffset, MtSatToInt32(dq_cnt));
+      else if (cmd.drive_mode == DRIVE_MODE_CST) {
+        // CST 模式：纯力矩控制
+        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+        EC_T_LREAL tau_permille = cmd.tau / fRatedTorque * 1000.0;
+        if (tau_permille > 3000.0) tau_permille = 3000.0;
+        if (tau_permille < -3000.0) tau_permille = -3000.0;
+        
+        if (pDemoAxis->pwTargetTorque != EC_NULL) {
+            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+        }
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CST;
+        }
       }
-      
-      // 7. 扭矩偏移 (0x60B2)
-      if (pDemoAxis->pwTorqueOffset != EC_NULL) {
-        const EC_T_SWORD tau_raw = (EC_T_SWORD)(cmd.tau * 1000.0f);
-        EC_SETWORD(pDemoAxis->pwTorqueOffset, tau_raw);
+    }
+    /* ===== 已使能但无有效命令或 IDLE：保持当前位置 ===== */
+    else if (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) {
+      if (pDemoAxis->pnActPosition != EC_NULL && pDemoAxis->pnTargetPosition != EC_NULL) {
+          EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
       }
-      
-      // 8. 模式下发 0x6060
-      if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-        *pDemoAxis->pbyModeOfOperation = cmd.mode;
+      if (pDemoAxis->pnTargetVelocity != EC_NULL) {
+        EC_SETDWORD(pDemoAxis->pnTargetVelocity, 0);
       }
-    } else if ((S_RunMode == MT_RUNMODE_AUTO) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
-      /* 只有在 Operation Enabled 时，驱动才会执行你写入的目标（否则多半被忽略/限幅） */
-      /* 这里的 fCurPos/fCurVel 是 demo 内部单位，最终会换算成驱动对象的单位：
-       * - TargetPosition 写入的是 int32（EC_T_INT），通常对应编码器计数/脉冲
-       * - INC_PERMM
-       * 是一个示例换算系数（实际工程应由编码器分辨率/机械传动比确定）
-       */
-      /* 把内部位置换算成目标位置（int32），并根据越界决定换向 */
-      lPosTmp = (int64_t)(pDemoAxis->fCurPos * INC_PERMM);
-      if (lPosTmp < -2147483648) {
-        /* 目标越过 int32 下界：切回正向运动（demo 通过切换运动阶段实现往复） */
-        pDemoAxis->eMovingStat = MOVE_STAT_POS_ACC;
-      } else if (lPosTmp > 2147483647) {
-        /* 目标越过 int32 上界：切回反向运动 */
-        pDemoAxis->eMovingStat = MOVE_STAT_NEG_ACC;
-      }
-
-      /* 梯形速度曲线：加速 -> 匀速 -> 减速 -> 反向加速 -> ... */
+      pDemoAxis->fCurVel = 0;
+    }
+    /* ===== [已删除] 旧自动模式代码开始 ===== */
+    else if (0) { // 占位，防止编译错误
+      int64_t lPosTmp = 0;
       switch (pDemoAxis->eMovingStat) {
       case MOVE_STAT_POS_ACC:
         /* 正向加速阶段：速度逐步增加到 +MAX_VEL */
@@ -1155,18 +1161,9 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
                     (EC_T_INT)(pDemoAxis->fCurVel * INC_PERMM));
       }
       /* demo 原本会写死 0x6071 TargetTorque=200；为了避免误触发扭矩指令，这里不再周期写入。 */
-    } else if ((S_RunMode == MT_RUNMODE_MANUAL) &&(pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
-      /* [2026-01-14] 目的：手动模式但没有有效cmd时，保持不动（目标贴住实际 + 速度清零） */
-      if (pDemoAxis->pnActPosition != EC_NULL) {
-        if (pDemoAxis->pnTargetPosition != EC_NULL) {
-          EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
-        }
-      }
-      if (pDemoAxis->pnTargetVelocity != EC_NULL) {
-        EC_SETDWORD(pDemoAxis->pnTargetVelocity, 0);
-      }
-      pDemoAxis->fCurVel = 0;
-    } else {
+    }
+    /* ===== 未使能状态：对齐内部位置到实际位置 ===== */
+    else {
       /* 未使能时：把内部状态对齐到实际位置，避免一使能就跳变 */
       // ... 保持你原来的 else 内容 ...
       /* 未使能时：把内部状态对齐到实际位置，避免一使能就跳变 */
@@ -1186,16 +1183,27 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
   } /* loop through axis list */
 }
 
-/* [2026-01-14] 目的：设置运行模式（0自动/1手动） */
-EC_T_VOID MT_SetRunMode(MT_RUN_MODE eMode)
+/* [2026-01-23] 设置全局驱动模式 */
+EC_T_VOID MT_SetGlobalDriveMode(DriveMode mode)
 {
-  S_RunMode = eMode;
+  S_GlobalDriveMode = mode;
 }
 
-/* [2026-01-14] 目的：获取运行模式 */
-MT_RUN_MODE MT_GetRunMode(EC_T_VOID)
+/* [2026-01-23] 获取全局驱动模式 */
+DriveMode MT_GetGlobalDriveMode(EC_T_VOID)
 {
-  return S_RunMode;
+  return S_GlobalDriveMode;
+}
+
+/* [2026-01-23] 获取驱动模式名称 */
+const char* MT_GetDriveModeName(DriveMode mode)
+{
+  switch (mode) {
+    case DRIVE_MODE_PT:  return "PT";
+    case DRIVE_MODE_CSP: return "CSP";
+    case DRIVE_MODE_CST: return "CST";
+    default:             return "UNKNOWN";
+  }
 }
 
 /* 上层写入每轴 MotorCmd_（demo 级：无锁，直接覆盖） */

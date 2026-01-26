@@ -31,16 +31,37 @@
 #include "EcDemoParms.h"
 #include "EcSlaveInfo.h"
 
-/* [2026-01-19] 目的：按照最新《电机协议字段支持性详细分析表》更新发送结构体 */
+/* [2026-01-23] 驱动器控制模式（写入 0x6060）*/
+typedef enum _DriveMode
+{
+    DRIVE_MODE_PT  = 4,   /* Profile Torque - 扭矩/阻抗控制 */
+    DRIVE_MODE_CSP = 8,   /* Cyclic Sync Position - 位置控制 */
+    DRIVE_MODE_CST = 10,  /* Cyclic Sync Torque - 纯力矩控制 */
+} DriveMode;
+
+/* [2026-01-23] 运动功能（应用层逻辑）*/
+typedef enum _MotionFunc
+{
+    MOTION_IDLE      = 0,  /* 空闲/保持 */
+    MOTION_HOME      = 1,  /* 回零 */
+    MOTION_AGING     = 2,  /* 老化测试 */
+    MOTION_CONTROL   = 3,  /* 正常控制（set 命令）*/
+    MOTION_SHUTDOWN  = 4,  /* 停机/释放 */
+} MotionFunc;
+
+/* [2026-01-23] 重构：分离驱动模式和运动功能 */
 typedef struct _MotorCmd_
 {
-    EC_T_BYTE  mode;      /* 控制模式 0x6060: 0x08:CSP, 0x09:CSV, 0x0A:CST 等 */
-    EC_T_REAL  q;         /* 关节目标位置 (rad) -> 对应 0x607A */
-    EC_T_REAL  dq;        /* 关节目标速度 (rad/s) -> 对应 0x60B1 (Velocity Offset) */
-    EC_T_REAL  tau;       /* 关节前馈力矩 (N.m) -> 对应 0x60B2 (Torque Offset) */
-    EC_T_REAL  kp;        /* 关节刚度系数 (rad/s) -> 对应 0x3500 (SDO) */
-    EC_T_REAL  kd;        /* 阻尼系数 (rad/s) -> 对应 0x3501 (SDO) */
-    EC_T_DWORD reserve;   /* 预留 */
+    EC_T_BYTE  drive_mode;   /* 驱动器模式: DRIVE_MODE_PT/CSP/CST */
+    EC_T_BYTE  motion_func;  /* 运动功能: MOTION_IDLE/HOME/AGING/CONTROL/SHUTDOWN */
+    EC_T_SBYTE direction;    /* 方向: 0=正向, -1=反向（用于PT模式扭矩反转）*/
+    EC_T_REAL  q;            /* 目标位置 (rad) -> 0x607A */
+    EC_T_REAL  dq;           /* 目标速度 (rad/s) -> 0x60B1 或限速 */
+    EC_T_REAL  tau;          /* 前馈力矩/目标力矩 (N.m) -> 0x6071/0x60B2 */
+    EC_T_REAL  kp;           /* 刚度系数 -> 0x3500 (SDO) */
+    EC_T_REAL  kd;           /* 阻尼系数 -> 0x3501 (SDO) */
+    EC_T_REAL  tau_limit;    /* 力矩保护限制 (N.m) */
+    EC_T_REAL  range;        /* 老化范围 (rad) */
 } MotorCmd_;
 
 /* [2026-01-19] 目的：按照最新《电机协议字段支持性详细分析表》更新接收结构体 */
@@ -367,16 +388,10 @@ EC_T_VOID  MT_Workpd(T_EC_DEMO_APP_CONTEXT* pAppContext);
 EC_T_DWORD MT_SetAxisOpMod(EC_T_WORD wAxis, MC_T_CIA402_OPMODE eMode);
 EC_T_VOID  MT_SetSwitch(eStateCmd command);
 
-/* [2026-01-14] 目的：运行模式选择（启动后选择） */
-typedef enum _MT_RUN_MODE
-{
-    MT_RUNMODE_AUTO   = 0,  /* 自动：走原demo轨迹 */
-    MT_RUNMODE_MANUAL = 1   /* 手动：只响应 MotorCmd_/命令线程 */
-} MT_RUN_MODE;
-
-/* [2026-01-14] 目的：设置/获取当前运行模式（0自动/1手动） */
-EC_T_VOID   MT_SetRunMode(MT_RUN_MODE eMode);
-MT_RUN_MODE MT_GetRunMode(EC_T_VOID);
+/* [2026-01-23] 全局驱动模式管理 */
+EC_T_VOID   MT_SetGlobalDriveMode(DriveMode mode);
+DriveMode   MT_GetGlobalDriveMode(EC_T_VOID);
+const char* MT_GetDriveModeName(DriveMode mode);
 
 /* 上层接口：每轴写命令/读状态（demo 级，无锁；如需强一致性请自行加锁/双缓冲） */
 EC_T_VOID  MT_SetMotorCmd(EC_T_WORD wAxis, const MotorCmd_* pCmd);

@@ -1647,63 +1647,115 @@ static void* CmdThread(void*)
     printf("[CMD] 输入 0 或 1 后回车: ");
     fflush(stdout);
 
-    if (fgets(line, sizeof(line), stdin) != EC_NULL)
-    {
-    int m = 0;
-    sscanf(line, "%d", &m);
-    if (m == 1)
-    {
-        MT_SetRunMode(MT_RUNMODE_MANUAL);
-        printf("[CMD] 已切换为: 手动模式 (MANUAL)\n");
-    }
-    else
-    {
-        MT_SetRunMode(MT_RUNMODE_AUTO);
-        printf("[CMD] 已切换为: 自动模式 (AUTO)\n");
-    }
+    /* [2026-01-23] 默认使用 CSP 模式 */
+    MT_SetGlobalDriveMode(DRIVE_MODE_CSP);
+    printf("[CMD] 默认全局模式: CSP (位置控制)\n");
     fflush(stdout);
-    }     
     
-    printf("[CMD] 输入示例:\n");
-    printf("  set <axis> <mode> <q> <dq> <tau> <kp> <kd>  (设置控制参数)\n");
-    printf("  get <axis>                                  (读取反馈状态)\n");
-    printf("\n[CMD] 常用命令 (轴号范围 1-7):\n");
-    printf("  show                                        (显示所有轴位置)\n");
-    printf("  teach_min <axis>                            (记录当前位置为最小限位)\n");
-    printf("  teach_max <axis>                            (记录当前位置为最大限位)\n");
-    printf("  enable <axis>                               (安全使能电机)\n");
-    printf("  aging <axis> <speed>                        (启动老化往复测试)\n");
-    printf("  stop <axis>                                 (安全停机/释放)\n");
-    printf("  mode <0|1>                                  (0自动/1手动)\n");
-    printf("  calib                                       (标定：读取关节位置生成JSON)\n");
-    printf("  home                                        (回零：所有轴移动到零点)\n");
-    printf("  torque <axis> <tau> <kp> <q> <kd> <dq>       (阻抗控制/PT模式)\n");
+    printf("\n[CMD] === 紧急命令 ===\n");
+    printf("  estop / e                                   紧急停止（所有轴立即释放）\n");
+    printf("\n[CMD] === 控制命令 ===\n");
+    printf("  mode pt|csp|cst                             选择全局控制模式\n");
+    printf("  set <axis> ...                              根据当前模式下发控制\n");
+    printf("    PT模式:  set <axis> <tau> <kp> <q> <kd> <dq>\n");
+    printf("    CSP模式: set <axis> <q> <dq>\n");
+    printf("    CST模式: set <axis> <tau>\n");
+    printf("  enable <axis>                               使能电机\n");
+    printf("  stop <axis>                                 停机/释放\n");
+    printf("\n[CMD] === 运动功能 ===\n");
+    printf("  show                                        显示所有轴位置\n");
+    printf("  get <axis>                                  获取单轴详细状态\n");
+    printf("  home                                        回零\n");
+    printf("  aging <axis> <speed>                        老化测试\n");
+    printf("  calib                                       标定\n");
+    printf("  torque <axis> <tau> <kp> <q> <kd> <dq>       阻抗控制/PT模式\n");
     fflush(stdout);
 
     while (fgets(line, sizeof(line), stdin) != nullptr) {
         // 去掉换行
         line[strcspn(line, "\r\n")] = 0;
 
-        /* [2026-01-19] 目的：运行时切换模式（0自动/1手动） */
+        /* [2026-01-26] 帮助命令 */
+        if (strcmp(line, "help") == 0 || strcmp(line, "h") == 0 || strcmp(line, "?") == 0) {
+            printf("\n");
+            printf("╔══════════════════════════════════════════════════════════════════╗\n");
+            printf("║                        命令帮助                                  ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【紧急命令】                                                     ║\n");
+            printf("║   estop / e              紧急停止（所有轴立即释放）              ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【模式选择】 (先选模式，再发控制命令)                            ║\n");
+            printf("║   mode pt                切换到 PT 模式（阻抗控制）              ║\n");
+            printf("║   mode csp               切换到 CSP 模式（位置控制）[默认]       ║\n");
+            printf("║   mode cst               切换到 CST 模式（纯力矩控制）           ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【控制命令】                                                     ║\n");
+            printf("║   enable <axis>          使能电机并保持当前位置                  ║\n");
+            printf("║   stop <axis>            停机/释放单轴                           ║\n");
+            printf("║   set <axis> ...         根据当前模式下发控制：                  ║\n");
+            printf("║     PT模式:  set <axis> <tau> <kp> <q> <kd> <dq>                 ║\n");
+            printf("║              tau=前馈扭矩, kp=刚度, q=目标位置                   ║\n");
+            printf("║              kd=阻尼, dq=目标速度                                ║\n");
+            printf("║     CSP模式: set <axis> <q> <dq>                                 ║\n");
+            printf("║              q=目标位置(rad), dq=速度(rad/s)                     ║\n");
+            printf("║     CST模式: set <axis> <tau>                                    ║\n");
+            printf("║              tau=目标力矩(N.m)                                   ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【运动功能】                                                     ║\n");
+            printf("║   home                   回零（顺序：7→1）                       ║\n");
+            printf("║   aging <axis> <speed>   老化测试                                ║\n");
+            printf("║   calib                  标定（记录负极限位置）                  ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【状态查询】                                                     ║\n");
+            printf("║   show                   显示所有轴位置                          ║\n");
+            printf("║   get <axis>             获取单轴详细状态                        ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【参数说明】                                                     ║\n");
+            printf("║   <axis>  轴号 1-7                                               ║\n");
+            printf("║   <q>     位置，单位 rad                                         ║\n");
+            printf("║   <dq>    速度，单位 rad/s                                       ║\n");
+            printf("║   <tau>   力矩，单位 N.m                                         ║\n");
+            printf("║   <kp>    刚度系数                                               ║\n");
+            printf("║   <kd>    阻尼系数                                               ║\n");
+            printf("╚══════════════════════════════════════════════════════════════════╝\n");
+            printf("\n");
+            fflush(stdout);
+            continue;
+        }
+
+        /* [2026-01-23] 紧急停止：所有轴立即停止 */
+        if (strcmp(line, "estop") == 0 || strcmp(line, "e") == 0) {
+            printf("\n[ESTOP] !!! 紧急停止 - 所有轴停机 !!!\n");
+            for (int i = 0; i < 7; i++) {
+                MotorCmd_ cmd{};
+                cmd.motion_func = MOTION_SHUTDOWN;
+                MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+            }
+            printf("[ESTOP] 所有轴已释放\n\n");
+            fflush(stdout);
+            continue;
+        }
+
+        /* [2026-01-23] 全局驱动模式选择 */
         if (strncmp(line, "mode ", 5) == 0)
         {
-            int m = 0;
-            if (sscanf(line + 5, "%d", &m) == 1)
-            {
-                if (m == 1)
-                {
-                    MT_SetRunMode(MT_RUNMODE_MANUAL);
-                    printf("[CMD] OK: mode=1 (MANUAL)\n");
-                }
-                else
-                {
-                    MT_SetRunMode(MT_RUNMODE_AUTO);
-                    printf("[CMD] OK: mode=0 (AUTO)\n");
-                }
-            }
-            else
-            {
-                printf("[CMD] 用法: mode <0|1>\n");
+            char mode_str[16] = {0};
+            sscanf(line + 5, "%s", mode_str);
+            
+            if (strcmp(mode_str, "pt") == 0) {
+                MT_SetGlobalDriveMode(DRIVE_MODE_PT);
+                printf("[CMD] OK: 全局模式 = PT (阻抗控制)\n");
+                printf("     set 用法: set <axis> <tau> <kp> <q> <kd> <dq>\n");
+            } else if (strcmp(mode_str, "csp") == 0) {
+                MT_SetGlobalDriveMode(DRIVE_MODE_CSP);
+                printf("[CMD] OK: 全局模式 = CSP (位置控制)\n");
+                printf("     set 用法: set <axis> <q> <dq>\n");
+            } else if (strcmp(mode_str, "cst") == 0) {
+                MT_SetGlobalDriveMode(DRIVE_MODE_CST);
+                printf("[CMD] OK: 全局模式 = CST (力矩控制)\n");
+                printf("     set 用法: set <axis> <tau>\n");
+            } else {
+                printf("[CMD] 用法: mode pt|csp|cst\n");
             }
             fflush(stdout);
             continue;
@@ -1755,7 +1807,8 @@ static void* CmdThread(void*)
                 }
                 cmd.kp = 32.0f;
                 cmd.kd = 30.0f;
-                cmd.mode = 8; 
+                cmd.drive_mode = MT_GetGlobalDriveMode();
+                cmd.motion_func = MOTION_CONTROL;
                 MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
                 printf("[CMD] OK: enabling axis %d at pos %.3f with default KP/KD\n", axis, cmd.q);
             }
@@ -1776,9 +1829,10 @@ static void* CmdThread(void*)
                 }
                 
                 MotorCmd_ cmd{};
-                cmd.mode = 99;    // 自动挂老化档
+                cmd.drive_mode = MT_GetGlobalDriveMode();
+                cmd.motion_func = MOTION_AGING;
                 cmd.dq   = speed; // 设置运行速度
-                cmd.kp   = 32.0f; // 保持锁死力量
+                cmd.kp   = 32.0f; // 阻抗参数
                 cmd.kd   = 30.0f;
                 MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
                 printf("[CMD] OK: Start aging for Axis %d at speed %.3f rad/s\n", axis, speed);
@@ -1803,7 +1857,8 @@ static void* CmdThread(void*)
                 }
                 
                 MotorCmd_ cmd{};
-                cmd.mode = 4;     // PT 模式
+                cmd.drive_mode = DRIVE_MODE_PT;
+                cmd.motion_func = MOTION_CONTROL;
                 cmd.tau = tau;    // 前馈扭矩 (N·m)
                 cmd.kp = kp;      // 刚度系数
                 cmd.q = q_des;    // 目标位置 (rad)
@@ -1954,19 +2009,35 @@ static void* CmdThread(void*)
                 if (strcmp(confirm, "cancel") == 0) {
                     printf("[回零] 已取消\n");
                 } else {
+                    // [2026-01-26] 先把所有轴设为 SHUTDOWN，确保其他轴不会乱动
+                    printf("[回零] 正在停止所有轴...\n");
+                    for (int j = 0; j < g_CalibData.total_joints; j++) {
+                        MotorCmd_ shutdown_cmd{};
+                        shutdown_cmd.motion_func = MOTION_SHUTDOWN;
+                        MT_SetMotorCmd((EC_T_WORD)j, &shutdown_cmd);
+                    }
+                    OsSleep(300);  // 等待所有轴停止
+                    
                     // 从最后一个轴到第 1 个轴逐个回零
                     for (int i = g_CalibData.total_joints - 1; i >= 0; i--) {
                         int axis_num = i + 1;  // 显示用的轴号 1-7
                         printf("\n[回零] >>> 轴 %d (%s) 开始回零...\n", axis_num, g_CalibData.joint_names[i]);
                         
-                        // 1. 先使能电机
+                        // 0. 先释放电机，重置位置同步标志
                         MotorCmd_ cmd{};
+                        cmd.motion_func = MOTION_SHUTDOWN;
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                        OsSleep(200);  // 等待释放完成
+                        
+                        // 1. 再使能电机（会自动同步当前位置）
                         MotorState_ st;
                         MT_GetMotorState((EC_T_WORD)i, &st);
                         cmd.q = st.q_fb;  // 先同步到当前位置
                         cmd.kp = 32.0f;
                         cmd.kd = 30.0f;
-                        cmd.mode = 8;  // 位置模式
+                        cmd.direction = (EC_T_SBYTE)g_CalibData.directions[i];  // 设置方向（用于PT模式扭矩反转）
+                        cmd.drive_mode = MT_GetGlobalDriveMode();  // 跟随全局模式
+                        cmd.motion_func = MOTION_CONTROL;
                         MT_SetMotorCmd((EC_T_WORD)i, &cmd);
                         OsSleep(500);  // 等待使能稳定
                         
@@ -1995,8 +2066,8 @@ static void* CmdThread(void*)
                                        axis_num, st.q_fb, target, error);
                             }
                             
-                            // 误差小于 0.05 rad 认为到达（放宽阈值，约 2.9°）
-                            if (error < 0.05f) {
+                            // 误差小于 0.01 rad 认为到达（约 0.6°）
+                            if (error < 0.02f) {
                                 printf("  [轴%d] ✓ 已到达零点位置: %.4f rad (误差: %.4f)\n", axis_num, st.q_fb, error);
                                 break;
                             }
@@ -2022,6 +2093,22 @@ static void* CmdThread(void*)
                         }
                     }
                     
+                    // [2026-01-26] 回零完成后，把所有轴的 dq 设为 0，防止 PT 模式下持续产生扭矩
+                    for (int i = 0; i < g_CalibData.total_joints; i++) {
+                        MotorCmd_ cmd{};
+                        MotorState_ st;
+                        MT_GetMotorState((EC_T_WORD)i, &st);
+                        cmd.q = zero_positions[i];  // 保持在零点
+                        cmd.dq = 0.0f;              // 速度设为 0！
+                        cmd.kp = 32.0f;
+                        cmd.kd = 30.0f;
+                        cmd.tau = 0.0f;
+                        cmd.direction = (EC_T_SBYTE)g_CalibData.directions[i];
+                        cmd.drive_mode = MT_GetGlobalDriveMode();
+                        cmd.motion_func = MOTION_CONTROL;
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                    }
+                    
                     printf("\n[回零] ========================================\n");
                     printf("[回零] 回零完成！所有轴保持在零点位置。\n");
                 }
@@ -2035,42 +2122,71 @@ static void* CmdThread(void*)
             int axis = 0;
             if (sscanf(line + 8, "%d", &axis) == 1) {
                 MotorCmd_ cmd{};
-                cmd.mode = 0; // Shutdown
+                cmd.motion_func = MOTION_SHUTDOWN;
                 MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
                 printf("[CMD] OK: disabling axis %d\n", axis);
             }
             continue;
         }
 
-        /* [2026-01-19] 目的：适配新协议字段的 set 命令 (轴号由 1-7 转为 0-6) */
+        /* [2026-01-23] 重构：set 命令根据全局模式自动解析 */
         if (strncmp(line, "set ", 4) == 0) {
-            int axis = 0, mode = 0;
-            float q = 0, dq = 0, tau = 0, kp = 0, kd = 0;
-            // 按顺序解析：轴, 模式, 位置, 速度, 扭矩, KP, KD
-            int num = sscanf(line + 4, "%d %d %f %f %f %f %f", &axis, &mode, &q, &dq, &tau, &kp, &kd);
-            if (num >= 4) {
-                // [2026-01-22] 软件限位检查
-                if (!CheckSoftLimit(axis - 1, q)) {
-                    printf("[CMD] 拒绝: 目标位置超出软件限位范围\n");
-                    fflush(stdout);
-                    continue;
+            int axis = 0;
+            sscanf(line + 4, "%d", &axis);
+            
+            DriveMode mode = MT_GetGlobalDriveMode();
+            MotorCmd_ cmd{};
+            cmd.drive_mode = mode;
+            cmd.motion_func = MOTION_CONTROL;
+            
+            if (mode == DRIVE_MODE_PT) {
+                // PT模式: set <axis> <tau> <kp> <q> <kd> <dq>
+                float tau, kp, q, kd, dq;
+                if (sscanf(line + 4, "%*d %f %f %f %f %f", &tau, &kp, &q, &kd, &dq) == 5) {
+                    if (!CheckSoftLimit(axis - 1, q)) {
+                        printf("[CMD] 拒绝: 目标位置超出软件限位范围\n");
+                        fflush(stdout);
+                        continue;
+                    }
+                    cmd.tau = tau;
+                    cmd.kp = kp;
+                    cmd.q = q;
+                    cmd.kd = kd;
+                    cmd.dq = dq;
+                    MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
+                    printf("[CMD] OK: axis=%d [PT] tau=%.2f kp=%.1f q=%.2f kd=%.1f dq=%.2f\n",
+                           axis, tau, kp, q, kd, dq);
+                } else {
+                    printf("[CMD] PT模式用法: set <axis> <tau> <kp> <q> <kd> <dq>\n");
                 }
-                
-                MotorCmd_ cmd{};
-                // 默认值保护：如果没输入 KP/KD (num < 6)，则使用安全默认值
-                // 这样可以防止 set 命令意外地把电机力量设为 0
-                cmd.mode = (EC_T_BYTE)mode;
-                cmd.q    = q;
-                cmd.dq   = dq;
-                cmd.tau  = tau;
-                cmd.kp   = (num >= 6) ? kp : 32.0f; 
-                cmd.kd   = (num >= 7) ? kd : 30.0f;
-                
-                MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
-                printf("[CMD] OK: axis=%d mode=0x%02X q=%.3f dq=%.3f tau=%.3f kp=%.1f kd=%.1f\n", 
-                       axis, mode, q, dq, tau, cmd.kp, cmd.kd);
-            } else {
-                printf("[CMD] 用法: set <1-7> <mode> <q> <dq> [tau] [kp] [kd]\n");
+            } else if (mode == DRIVE_MODE_CSP) {
+                // CSP模式: set <axis> <q> <dq>
+                float q, dq;
+                if (sscanf(line + 4, "%*d %f %f", &q, &dq) == 2) {
+                    if (!CheckSoftLimit(axis - 1, q)) {
+                        printf("[CMD] 拒绝: 目标位置超出软件限位范围\n");
+                        fflush(stdout);
+                        continue;
+                    }
+                    cmd.q = q;
+                    cmd.dq = dq;
+                    cmd.kp = 32.0f;  // 默认阻抗参数
+                    cmd.kd = 30.0f;
+                    MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
+                    printf("[CMD] OK: axis=%d [CSP] q=%.3f dq=%.2f\n", axis, q, dq);
+                } else {
+                    printf("[CMD] CSP模式用法: set <axis> <q> <dq>\n");
+                }
+            } else if (mode == DRIVE_MODE_CST) {
+                // CST模式: set <axis> <tau>
+                float tau;
+                if (sscanf(line + 4, "%*d %f", &tau) == 1) {
+                    cmd.tau = tau;
+                    MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
+                    printf("[CMD] OK: axis=%d [CST] tau=%.3f\n", axis, tau);
+                } else {
+                    printf("[CMD] CST模式用法: set <axis> <tau>\n");
+                }
             }
             fflush(stdout);
             continue;
@@ -2110,7 +2226,7 @@ static void* CmdThread(void*)
             int axis = 0;
             if (sscanf(line + 5, "%d", &axis) == 1) {
                 MotorCmd_ cmd{};
-                cmd.mode = 0; // Shutdown
+                cmd.motion_func = MOTION_SHUTDOWN;
                 MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
                 printf("[CMD] OK: stop axis=%d\n", axis);
             } else {
