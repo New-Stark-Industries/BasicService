@@ -1891,9 +1891,9 @@ static void* CmdThread(void*)
                     
                     // 7 个关节的固定参数 (URDF 命名)
                     const char* joint_names[7] = {"arm_j1_l", "arm_j2_l", "arm_j3_l", "arm_j4_l", "arm_j5_l", "arm_j6_l", "arm_j7_l"};
-                    const int directions[7] = {0, 0, 0, -1, -1, -1, -1};  // 0=正向, -1=负向
-                    const float range_min[7] = {-3.53f, -1.78f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f};
-                    const float range_max[7] = { 1.43f,  0.91f,  0.82f,  0.30f,  1.61f,  0.35f,  1.61f};
+                    const int directions[7] = {-1, -1, 0, -1 , -1, -1, 0};  // 0=正向, -1=负向
+                    const float range_min[7] = {-1.43f, -0.91f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f};
+                    const float range_max[7] = { 3.53f,  1.78f,  0.82f,  0.30f,  1.61f,  0.35f,  1.61f};
                     const int total_joints = 7;
                     
                     // 读取实际位置
@@ -2009,14 +2009,8 @@ static void* CmdThread(void*)
                 if (strcmp(confirm, "cancel") == 0) {
                     printf("[回零] 已取消\n");
                 } else {
-                    // [2026-01-26] 先把所有轴设为 SHUTDOWN，确保其他轴不会乱动
-                    printf("[回零] 正在停止所有轴...\n");
-                    for (int j = 0; j < g_CalibData.total_joints; j++) {
-                        MotorCmd_ shutdown_cmd{};
-                        shutdown_cmd.motion_func = MOTION_SHUTDOWN;
-                        MT_SetMotorCmd((EC_T_WORD)j, &shutdown_cmd);
-                    }
-                    OsSleep(300);  // 等待所有轴停止
+                    // [2026-01-27] 不再一次性 SHUTDOWN 所有轴，避免机械臂自由落体
+                    // 每个轴在处理时才单独 SHUTDOWN 并重新使能
                     
                     // 从最后一个轴到第 1 个轴逐个回零
                     for (int i = g_CalibData.total_joints - 1; i >= 0; i--) {
