@@ -47,6 +47,89 @@
 #include <fstream>
 #include <ctime>
 #include <sstream>
+#include <thread>
+#include <chrono>
+#include <cmath>
+#include <atomic>
+
+/* [2026-01-28] DDS 测试线程相关 */
+static std::atomic<bool> g_bDDSTestRunning(false);
+static std::thread* g_pDDSTestThread = nullptr;
+
+/* DDS 测试线程函数：模拟上位机以 1kHz 发送命令 */
+static void DDSTestThreadFunc() {
+    printf("[DDS Test] 模拟线程启动，频率 1kHz\n");
+    
+    /* 初始参数 */
+    float amplitudes[7] = {0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f}; /* 振幅 (rad) */
+    float frequencies[7] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}; /* 频率 (Hz) */
+    float centers[7] = {0};
+    bool initialized = false;
+    
+    auto next_wake = std::chrono::steady_clock::now();
+    double t = 0.0;
+    const double dt = 0.001; /* 1ms */
+    
+    while (g_bDDSTestRunning) {
+        /* 1. 初始化中心位置（第一次运行时）*/
+        if (!initialized) {
+            for (int i = 0; i < 7; i++) {
+                MotorState_ st;
+                if (MT_GetMotorState((EC_T_WORD)i, &st)) {
+                    centers[i] = st.q_fb;
+                } else {
+                    centers[i] = 0.0f;
+                }
+            }
+            initialized = true;
+            printf("[DDS Test] 初始化完成，以当前位置为中心开始运动\n");
+        }
+        
+        /* 2. 构造 DDS 命令 */
+        DDS_LowCmd ddsCmd;
+        OsMemset(&ddsCmd, 0, sizeof(DDS_LowCmd));
+        
+        DriveMode currentMode = MT_GetGlobalDriveMode();
+        
+        for (int i = 0; i < 7; i++) {
+            int ddsIndex = DDS_MOTOR_OFFSET + i;
+            
+            /* 计算正弦波目标: q = center + A * sin(2*pi*f*t) */
+            /* 稍微错开相位，让动作看起来自然点 */
+            float phase = i * 0.5f; 
+            float targetQ = centers[i] + amplitudes[i] * sin(2 * 3.14159f * frequencies[i] * t + phase);
+            float targetDQ = amplitudes[i] * 2 * 3.14159f * frequencies[i] * cos(2 * 3.14159f * frequencies[i] * t + phase);
+            
+            ddsCmd.motor_cmd[ddsIndex].mode = (uint8_t)currentMode;
+            ddsCmd.motor_cmd[ddsIndex].q    = targetQ;
+            ddsCmd.motor_cmd[ddsIndex].dq   = targetDQ;
+            
+            /* 补全其他参数 */
+            if (currentMode == DRIVE_MODE_PT) {
+                ddsCmd.motor_cmd[ddsIndex].kp = 50.0f;
+                ddsCmd.motor_cmd[ddsIndex].kd = 2.0f;
+                ddsCmd.motor_cmd[ddsIndex].tau = 0.0f;
+            } else if (currentMode == DRIVE_MODE_CST) {
+                // CST 模式下简单演示：力矩设为 0 (安全起见) 或根据物理模型计算
+                ddsCmd.motor_cmd[ddsIndex].tau = 0.0f; 
+            }
+        }
+        
+        /* 计算 CRC */
+        ddsCmd.crc = MT_Crc32((uint32_t*)&ddsCmd, (sizeof(DDS_LowCmd) / sizeof(uint32_t)) - 1);
+        
+        /* 3. 发送命令 (调用处理函数) */
+        MT_ProcessDDSCommand(&ddsCmd);
+        
+        /* 4. 1kHz 控频 */
+        t += dt;
+        next_wake += std::chrono::milliseconds(1);
+        std::this_thread::sleep_until(next_wake);
+    }
+    
+    printf("[DDS Test] 模拟线程已停止\n");
+}
+
 
 /*-DEFINES-------------------------------------------------------------------*/
 #define CALIB_FILE_NAME "robot_calib.json"
@@ -1642,17 +1725,91 @@ static void* CmdThread(void*)
         printf("[系统] 标定完成后，home 命令才能正常使用\n\n");
     }
 
-    /* [2026-01-14] 目的：启动后先选择运行模式（0自动demo / 1手动命令） */
-    printf("[CMD] 请选择模式: 0=自动demo  1=手动命令\n");
-    printf("[CMD] 输入 0 或 1 后回车: ");
-    fflush(stdout);
-
-    /* [2026-01-23] 默认使用 CSP 模式 */
+    /* ============================================================================
+     * [2026-01-28] 运行模式选择：调试模式 vs 工作模式
+     * 
+     * 调试模式：命令行交互，支持 home/calib/set/mode 等命令
+     * 工作模式：接收 DDS 数据，直接控制电机（无命令行交互）
+     * ============================================================================ */
+    
+    /* 默认使用 CSP 模式 */
     MT_SetGlobalDriveMode(DRIVE_MODE_CSP);
-    printf("[CMD] 默认全局模式: CSP (位置控制)\n");
+    MT_SetRunMode(RUN_MODE_DEBUG);  /* 默认调试模式 */
+    
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║                      选择运行模式                                ║\n");
+    printf("╠══════════════════════════════════════════════════════════════════╣\n");
+    printf("║   1. 调试模式 (Debug)                                            ║\n");
+    printf("║      - 命令行交互控制                                            ║\n");
+    printf("║      - 支持 home/calib/set/mode 等命令                           ║\n");
+    printf("║      - 可切换驱动模式 (PT/CSP/CST)                               ║\n");
+    printf("╠══════════════════════════════════════════════════════════════════╣\n");
+    printf("║   2. 工作模式 (Work)                                             ║\n");
+    printf("║      - 接收 DDS 数据控制                                         ║\n");
+    printf("║      - 使用调试模式下设置的驱动模式 (默认 CSP)                   ║\n");
+    printf("║      - 无命令行交互                                              ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n[系统] 当前驱动模式: %s\n", MT_GetDriveModeName(MT_GetGlobalDriveMode()));
+    printf("[系统] 请输入 1 或 2 选择运行模式: ");
     fflush(stdout);
     
-    printf("\n[CMD] === 紧急命令 ===\n");
+    /* 读取用户选择 */
+    int runModeChoice = 1;  /* 默认调试模式 */
+    if (fgets(line, sizeof(line), stdin) != nullptr) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (strcmp(line, "2") == 0) {
+            runModeChoice = 2;
+        }
+    }
+    
+    /* ========== 工作模式 ========== */
+    if (runModeChoice == 2) {
+        MT_SetRunMode(RUN_MODE_WORK);
+        printf("\n");
+        printf("╔══════════════════════════════════════════════════════════════════╗\n");
+        printf("║                    已进入工作模式 (Work Mode)                    ║\n");
+        printf("╠══════════════════════════════════════════════════════════════════╣\n");
+        printf("║   - 等待 DDS 数据...                                             ║\n");
+        printf("║   - 驱动模式: %-10s                                         ║\n", MT_GetDriveModeName(MT_GetGlobalDriveMode()));
+        printf("║   - 电机索引: DDS[14-20] -> 内部[0-6] -> 轴1-7                   ║\n");
+        printf("║   - 按 Ctrl+C 退出程序                                           ║\n");
+        printf("╚══════════════════════════════════════════════════════════════════╝\n");
+        printf("\n");
+        fflush(stdout);
+        
+        /* 工作模式主循环
+         * 注意：实际 DDS 数据接收由外部 DDS 程序完成
+         * 外部程序调用 MT_ProcessDDSCommand() 处理命令
+         * 外部程序调用 MT_GetDDSState() 获取状态
+         * 这里只是保持程序运行，等待外部调用
+         */
+        while (true) {
+            OsSleep(1000);  /* 每秒检查一次 */
+            
+            /* 可以在这里添加状态打印，方便调试 */
+            /* 例如每 10 秒打印一次电机状态 */
+            static int workModeCounter = 0;
+            if (++workModeCounter % 10 == 0) {
+                printf("[工作模式] 运行中... (驱动模式: %s)\n", 
+                       MT_GetDriveModeName(MT_GetGlobalDriveMode()));
+                fflush(stdout);
+            }
+        }
+        
+        return nullptr;  /* 正常情况不会执行到这里 */
+    }
+    
+    /* ========== 调试模式 ========== */
+    MT_SetRunMode(RUN_MODE_DEBUG);
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║                    已进入调试模式 (Debug Mode)                   ║\n");
+    printf("╠══════════════════════════════════════════════════════════════════╣\n");
+    printf("║   输入 help 查看所有命令                                         ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+    printf("[CMD] === 紧急命令 ===\n");
     printf("  estop / e                                   紧急停止（所有轴立即释放）\n");
     printf("\n[CMD] === 控制命令 ===\n");
     printf("  mode pt|csp|cst                             选择全局控制模式\n");
@@ -1666,11 +1823,16 @@ static void* CmdThread(void*)
     printf("  show                                        显示所有轴位置\n");
     printf("  get <axis>                                  获取单轴详细状态\n");
     printf("  home                                        回零\n");
-    printf("  aging <axis> <speed>                        老化测试\n");
     printf("  calib                                       标定\n");
     printf("  torque <axis> <tau> <kp> <q> <kd> <dq>       阻抗控制/PT模式\n");
+    printf("\n[CMD] === DDS 测试 ===\n");
+    printf("  dds                                         发送单帧模拟数据\n");
+    printf("  dds_state / ds                              查看 DDS 状态\n");
+    printf("  dds_test_start                              启动 1kHz 持续发送测试\n");
+    printf("  dds_test_stop                               停止持续测试\n");
     fflush(stdout);
 
+    /* 调试模式命令行循环 */
     while (fgets(line, sizeof(line), stdin) != nullptr) {
         // 去掉换行
         line[strcspn(line, "\r\n")] = 0;
@@ -1710,6 +1872,12 @@ static void* CmdThread(void*)
             printf("║   show                   显示所有轴位置                          ║\n");
             printf("║   get <axis>             获取单轴详细状态                        ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 【DDS 调试】 模拟 DDS 通讯（一帧7轴数据）                        ║\n");
+            printf("║   dds                    发送一帧（使用当前位置）                ║\n");
+            printf("║   dds <q1> <q2> .. <q7>  发送一帧（指定7轴目标位置）             ║\n");
+            printf("║     示例: dds 3.0 2.9 1.6 -1.5 -2.5 0.0 2.8  (回零点附近)        ║\n");
+            printf("║   dds_state / ds         查看 DDS 格式的电机状态                 ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【参数说明】                                                     ║\n");
             printf("║   <axis>  轴号 1-7                                               ║\n");
             printf("║   <q>     位置，单位 rad                                         ║\n");
@@ -1732,6 +1900,168 @@ static void* CmdThread(void*)
                 MT_SetMotorCmd((EC_T_WORD)i, &cmd);
             }
             printf("[ESTOP] 所有轴已释放\n\n");
+            fflush(stdout);
+            continue;
+        }
+
+        /* ============================================================================
+         * [2026-01-28] DDS 模拟命令：模拟一帧完整的 DDS 数据（同时控制 7 个轴）
+         * 
+         * 命令格式：dds <q1> <q2> <q3> <q4> <q5> <q6> <q7>
+         *   q1~q7: 轴1~轴7的目标位置 (rad)
+         * 
+         * 或者：dds（不带参数）
+         *   使用当前位置作为目标，测试 DDS 数据流
+         * 
+         * 功能：构造一帧完整的 DDS_LowCmd，包含所有 7 个电机的命令
+         * 索引映射：轴1-7 对应 DDS 索引 14-20
+         * ============================================================================ */
+        if (strcmp(line, "dds") == 0 || strncmp(line, "dds ", 4) == 0) {
+            float targetPos[7] = {0};  /* 7 个轴的目标位置 */
+            float targetVel = 0.5f;    /* 默认速度 */
+            EC_T_BOOL useCurrentPos = EC_TRUE;  /* 是否使用当前位置 */
+            
+            /* 解析参数：如果提供了 7 个位置值则使用，否则用当前位置 */
+            if (strlen(line) > 4) {
+                int parsed = sscanf(line + 4, "%f %f %f %f %f %f %f",
+                                    &targetPos[0], &targetPos[1], &targetPos[2],
+                                    &targetPos[3], &targetPos[4], &targetPos[5],
+                                    &targetPos[6]);
+                if (parsed == 7) {
+                    useCurrentPos = EC_FALSE;
+                } else if (parsed > 0 && parsed < 7) {
+                    printf("[DDS] 错误：需要提供 7 个位置值，或不提供任何参数\n");
+                    printf("  用法: dds                                    (使用当前位置)\n");
+                    printf("  用法: dds <q1> <q2> <q3> <q4> <q5> <q6> <q7>\n");
+                    printf("  提示: 零点由标定数据计算，不是 0。先运行 home 查看各轴零点\n");
+                    printf("  示例: dds 3.0 2.9 1.6 -1.5 -2.5 0.0 2.8    (回零点附近)\n");
+                    fflush(stdout);
+                    continue;
+                }
+            }
+            
+            /* 如果使用当前位置，先获取当前状态 */
+            if (useCurrentPos) {
+                for (int i = 0; i < 7; i++) {
+                    MotorState_ state;
+                    MT_GetMotorState((EC_T_WORD)i, &state);
+                    targetPos[i] = state.q_fb;
+                }
+            }
+            
+            /* 构造完整的 DDS_LowCmd（模拟一帧 DDS 数据）*/
+            DDS_LowCmd ddsCmd;
+            OsMemset(&ddsCmd, 0, sizeof(DDS_LowCmd));
+            
+            /* 获取当前全局驱动模式 */
+            DriveMode currentMode = MT_GetGlobalDriveMode();
+            
+            /* 填充 7 个电机的命令（DDS 索引 14-20）*/
+            for (int i = 0; i < 7; i++) {
+                int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 索引: 14, 15, ..., 20 */
+                
+                ddsCmd.motor_cmd[ddsIndex].mode = (uint8_t)currentMode;
+                ddsCmd.motor_cmd[ddsIndex].q    = targetPos[i];
+                ddsCmd.motor_cmd[ddsIndex].dq   = targetVel;
+                
+                /* PT 模式需要额外参数 */
+                if (currentMode == DRIVE_MODE_PT) {
+                    ddsCmd.motor_cmd[ddsIndex].tau = 0.0f;   /* 前馈力矩 */
+                    ddsCmd.motor_cmd[ddsIndex].kp  = 50.0f;  /* 默认刚度 */
+                    ddsCmd.motor_cmd[ddsIndex].kd  = 2.0f;   /* 默认阻尼 */
+                }
+                
+                /* CST 模式：q 参数作为力矩 */
+                if (currentMode == DRIVE_MODE_CST) {
+                    ddsCmd.motor_cmd[ddsIndex].tau = targetPos[i];
+                }
+            }
+            
+            /* 计算 CRC32（不含 crc 字段本身）*/
+            ddsCmd.crc = MT_Crc32((uint32_t*)&ddsCmd, 
+                                   (sizeof(DDS_LowCmd) / sizeof(uint32_t)) - 1);
+            
+            /* 打印模拟的 DDS 帧信息 */
+            printf("\n");
+            printf("╔══════════════════════════════════════════════════════════════════╗\n");
+            printf("║              [DDS 模拟] 发送一帧完整数据                         ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║  驱动模式: %-10s                                            ║\n", MT_GetDriveModeName(currentMode));
+            printf("║  数据来源: %s                                          ║\n", useCurrentPos ? "当前位置" : "用户输入");
+            printf("║  CRC32:    0x%08X                                            ║\n", ddsCmd.crc);
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║  轴号  DDS索引   目标位置(rad)   目标速度(rad/s)                 ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            for (int i = 0; i < 7; i++) {
+                int ddsIndex = DDS_MOTOR_OFFSET + i;
+                printf("║   %d      %2d       %8.4f         %6.2f                       ║\n",
+                       i + 1, ddsIndex, targetPos[i], targetVel);
+            }
+            printf("╚══════════════════════════════════════════════════════════════════╝\n");
+            
+            /* 调用 DDS 命令处理函数 */
+            EC_T_BOOL result = MT_ProcessDDSCommand(&ddsCmd);
+            
+            if (result) {
+                printf("[DDS 模拟] 一帧数据处理成功! (7 个电机命令已下发)\n");
+            } else {
+                printf("[DDS 模拟] 数据处理失败（CRC 错误或其他问题）\n");
+            }
+            printf("\n");
+            fflush(stdout);
+            continue;
+        }
+        
+        /* [2026-01-28] DDS 持续测试：启动/停止 1kHz 模拟线程 */
+        if (strcmp(line, "dds_test_start") == 0) {
+            if (g_bDDSTestRunning) {
+                printf("[DDS Test] 测试已经在运行中！\n");
+            } else {
+                g_bDDSTestRunning = true;
+                g_pDDSTestThread = new std::thread(DDSTestThreadFunc);
+                printf("[DDS Test] 已启动 1kHz 模拟线程...\n");
+                printf("[DDS Test] 输入 'dds_test_stop' 停止测试\n");
+            }
+            continue;
+        }
+        
+        if (strcmp(line, "dds_test_stop") == 0) {
+            if (!g_bDDSTestRunning) {
+                printf("[DDS Test] 测试未运行\n");
+            } else {
+                g_bDDSTestRunning = false;
+                if (g_pDDSTestThread && g_pDDSTestThread->joinable()) {
+                    g_pDDSTestThread->join();
+                    delete g_pDDSTestThread;
+                    g_pDDSTestThread = nullptr;
+                }
+                printf("[DDS Test] 测试已停止\n");
+            }
+            continue;
+        }
+        
+        /* [2026-01-28] DDS 状态查询：显示当前 DDS 格式的状态 */
+        if (strcmp(line, "dds_state") == 0 || strcmp(line, "ds") == 0) {
+            DDS_LowState ddsState;
+            MT_GetDDSState(&ddsState);
+            
+            printf("\n[DDS 状态] 当前电机状态 (DDS格式):\n");
+            printf("  运行模式: %s\n", (ddsState.mode_machine == RUN_MODE_DEBUG) ? "调试" : "工作");
+            printf("  CRC32: 0x%08X\n", ddsState.crc);
+            printf("  ─────────────────────────────────────────────────────────\n");
+            printf("  轴号  DDS索引   位置(rad)    速度(rad/s)   力矩(N.m)\n");
+            printf("  ─────────────────────────────────────────────────────────\n");
+            
+            for (int i = 0; i < DDS_MOTOR_USED; i++) {
+                int ddsIdx = DDS_MOTOR_OFFSET + i;
+                printf("   %d      %2d      %8.4f     %8.4f     %8.4f\n",
+                       i + 1, ddsIdx,
+                       ddsState.motor_state[ddsIdx].q,
+                       ddsState.motor_state[ddsIdx].dq,
+                       ddsState.motor_state[ddsIdx].tau_est);
+            }
+            printf("  ─────────────────────────────────────────────────────────\n");
+            printf("\n");
             fflush(stdout);
             continue;
         }
@@ -1891,7 +2221,7 @@ static void* CmdThread(void*)
                     
                     // 7 个关节的固定参数 (URDF 命名)
                     const char* joint_names[7] = {"arm_j1_l", "arm_j2_l", "arm_j3_l", "arm_j4_l", "arm_j5_l", "arm_j6_l", "arm_j7_l"};
-                    const int directions[7] = {-1, -1, 0, -1 , -1, -1, 0};  // 0=正向, -1=负向
+                    const int directions[7] = {-1, -1, 0, -1 , 0, 0, 0};  // 0=正向, -1=负向
                     const float range_min[7] = {-1.43f, -0.91f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f};
                     const float range_max[7] = { 3.53f,  1.78f,  0.82f,  0.30f,  1.61f,  0.35f,  1.61f};
                     const int total_joints = 7;

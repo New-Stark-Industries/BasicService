@@ -30,6 +30,7 @@
 #include "EcNotification.h"
 #include "EcDemoParms.h"
 #include "EcSlaveInfo.h"
+#include <stdint.h>  /* [2026-01-28] DDS 数据结构需要 uint8_t, uint32_t 等类型 */
 
 /* [2026-01-23] 驱动器控制模式（写入 0x6060）*/
 typedef enum _DriveMode
@@ -48,6 +49,107 @@ typedef enum _MotionFunc
     MOTION_CONTROL   = 3,  /* 正常控制（set 命令）*/
     MOTION_SHUTDOWN  = 4,  /* 停机/释放 */
 } MotionFunc;
+
+/* ============================================================================
+ * [2026-01-28] DDS 兼容数据结构
+ * 
+ * 目的：让数据结构和 DDS (stark_sdk_cpp) 的定义一致，方便数据交换
+ * 
+ * DDS 定义参考：
+ *   - stark_sdk_cpp/idl/MotorCmd_.idl
+ *   - stark_sdk_cpp/idl/MotorState_.idl
+ * ============================================================================ */
+
+/* [DDS 兼容] 运行模式：调试模式 vs 工作模式 */
+typedef enum _RunMode
+{
+    RUN_MODE_DEBUG = 0,   /* 调试模式：命令行交互，支持 home/calib/set 等命令 */
+    RUN_MODE_WORK  = 1,   /* 工作模式：接收 DDS 数据，直接控制电机 */
+} RunMode;
+
+/* [DDS 兼容] 电机命令结构体 - 和 DDS MotorCmd_ 完全一致
+ * 
+ * 字段说明：
+ *   mode  - 控制模式 (0=关闭, 1=使能)
+ *   q     - 目标位置 (rad)
+ *   dq    - 目标速度 (rad/s)
+ *   tau   - 目标力矩/前馈力矩 (N.m)
+ *   kp    - 位置刚度系数
+ *   kd    - 速度阻尼系数
+ *   reserve - 预留字段
+ */
+typedef struct _DDS_MotorCmd
+{
+    uint8_t  mode;        /* 控制模式: 0=关闭, 1=使能 */
+    float    q;           /* 目标位置 (rad) */
+    float    dq;          /* 目标速度 (rad/s) */
+    float    tau;         /* 目标力矩 (N.m) */
+    float    kp;          /* 刚度系数 */
+    float    kd;          /* 阻尼系数 */
+    uint32_t reserve;     /* 预留 */
+} DDS_MotorCmd;
+
+/* [DDS 兼容] 电机状态结构体 - 和 DDS MotorState_ 完全一致
+ * 
+ * 字段说明：
+ *   mode        - 当前模式
+ *   q           - 实际位置 (rad)
+ *   dq          - 实际速度 (rad/s)
+ *   ddq         - 实际加速度 (rad/s^2)
+ *   tau_est     - 估计力矩 (N.m)
+ *   temperature - [0]:MCU温度, [1]:电机温度
+ *   vol         - 母线电压 (V)
+ *   sensor      - 预留传感器数据
+ *   motorstate  - 电机状态字
+ *   reserve     - 预留字段
+ */
+typedef struct _DDS_MotorState
+{
+    uint8_t  mode;            /* 当前模式 */
+    float    q;               /* 实际位置 (rad) */
+    float    dq;              /* 实际速度 (rad/s) */
+    float    ddq;             /* 实际加速度 (rad/s^2) */
+    float    tau_est;         /* 估计力矩 (N.m) */
+    int16_t  temperature[2];  /* [0]:MCU温度, [1]:电机温度 */
+    float    vol;             /* 母线电压 (V) */
+    uint32_t sensor[2];       /* 预留传感器数据 */
+    uint32_t motorstate;      /* 电机状态字 */
+    uint32_t reserve[4];      /* 预留 */
+} DDS_MotorState;
+
+/* [DDS 兼容] 底层命令结构体 - 和 DDS LowCmd_ 对应
+ * 
+ * 注意：DDS 使用 sequence<MotorCmd_>，这里用固定数组
+ * DDS_MOTOR_COUNT = 28 (全部电机)
+ * 实际使用 motor_cmd[15] ~ motor_cmd[21] (共 7 个)
+ */
+#define DDS_MOTOR_COUNT   28    /* DDS 传输的电机总数 */
+#define DDS_MOTOR_OFFSET  15    /* 我们使用的电机起始索引 */
+#define DDS_MOTOR_USED    7     /* 我们实际使用的电机数量 (15-21) */
+
+typedef struct _DDS_LowCmd
+{
+    uint8_t       mode_pr;                      /* PR 模式 */
+    uint8_t       mode_machine;                 /* 状态机模式 */
+    DDS_MotorCmd  motor_cmd[DDS_MOTOR_COUNT];   /* 28 个电机命令 */
+    uint32_t      reserve[4];                   /* 预留 */
+    uint32_t      crc;                          /* CRC32 校验 */
+} DDS_LowCmd;
+
+/* [DDS 兼容] 底层状态结构体 - 和 DDS LowState_ 对应 */
+typedef struct _DDS_LowState
+{
+    uint32_t        version[2];                   /* 版本号 */
+    uint8_t         mode_pr;                      /* PR 模式 */
+    uint8_t         mode_machine;                 /* 状态机模式 */
+    uint32_t        tick;                         /* 时间戳/计数 */
+    /* IMU 数据暂不处理 */
+    DDS_MotorState  motor_state[DDS_MOTOR_COUNT]; /* 28 个电机状态 */
+    uint8_t         wireless_remote[40];          /* 遥控器数据 */
+    uint32_t        reserve[4];                   /* 预留 */
+    uint32_t        crc;                          /* CRC32 校验 */
+} DDS_LowState;
+
 
 /* [2026-01-23] 重构：分离驱动模式和运动功能 */
 typedef struct _MotorCmd_
@@ -411,6 +513,67 @@ EC_T_BOOL  MT_SetAxisUnitScale(EC_T_WORD wAxis, EC_T_LREAL encoder_cpr, EC_T_LRE
  * 参数单位：弧度 (rad)，函数内部自动转换为编码器计数 (PUU)
  */
 EC_T_BOOL  MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_LREAL fMaxLimitRad);
+
+
+/* ============================================================================
+ * [2026-01-28] DDS 工作模式相关函数
+ * 
+ * 目的：提供 DDS 数据和内部数据的转换接口
+ * 
+ * 使用方式：
+ *   1. 外部 DDS 程序接收到 LowCmd_ 后，调用 MT_ProcessDDSCommand() 处理
+ *   2. 外部 DDS 程序发送 LowState_ 前，调用 MT_GetDDSState() 获取状态
+ * 
+ * 索引映射说明：
+ *   - DDS 数组索引 14-20（第15-21个电机）
+ *   - 内部数组索引 0-6因为暂时只用15-21号电机
+ *   - 对外显示为 轴1-7
+ * ============================================================================ */
+
+/* [DDS] 设置/获取当前运行模式 */
+EC_T_VOID  MT_SetRunMode(RunMode mode);
+RunMode    MT_GetRunMode(EC_T_VOID);
+
+/* [DDS] CRC32 校验函数
+ * 参数：
+ *   ptr - 数据指针
+ *   len - 数据长度（以 uint32_t 为单位，即字节数/4）
+ * 返回：CRC32 校验值
+ */
+uint32_t MT_Crc32(uint32_t* ptr, uint32_t len);
+
+/* [DDS] 处理 DDS 命令
+ * 功能：从 DDS_LowCmd 中提取 motor_cmd[14]~[20]，转换并写入内部 MotorCmd_
+ * 参数：
+ *   pDDSCmd - DDS 底层命令指针
+ * 返回：
+ *   EC_TRUE  - 处理成功
+ *   EC_FALSE - CRC 校验失败或其他错误
+ */
+EC_T_BOOL MT_ProcessDDSCommand(const DDS_LowCmd* pDDSCmd);
+
+/* [DDS] 获取 DDS 状态
+ * 功能：从内部 MotorState_ 读取数据，填充到 DDS_LowState 的 motor_state[14]~[20]
+ * 参数：
+ *   pDDSState - DDS 底层状态指针（输出）
+ * 说明：函数会自动计算并填充 CRC
+ */
+EC_T_VOID MT_GetDDSState(DDS_LowState* pDDSState);
+
+/* [DDS] 单个电机命令转换：DDS_MotorCmd -> MotorCmd_
+ * 参数：
+ *   pDDSCmd    - DDS 电机命令（输入）
+ *   pMotorCmd  - 内部电机命令（输出）
+ *   driveMode  - 驱动模式 (PT/CSP/CST)
+ */
+EC_T_VOID MT_ConvertDDSCmdToMotorCmd(const DDS_MotorCmd* pDDSCmd, MotorCmd_* pMotorCmd, DriveMode driveMode);
+
+/* [DDS] 单个电机状态转换：MotorState_ -> DDS_MotorState
+ * 参数：
+ *   pMotorState - 内部电机状态（输入）
+ *   pDDSState   - DDS 电机状态（输出）
+ */
+EC_T_VOID MT_ConvertMotorStateToDDS(const MotorState_* pMotorState, DDS_MotorState* pDDSState);
 
 #endif /* INC_MOTROTECH */
 /*-END OF SOURCE FILE--------------------------------------------------------*/

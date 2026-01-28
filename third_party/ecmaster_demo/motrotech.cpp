@@ -1652,6 +1652,227 @@ EC_T_BOOL MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_L
     return EC_TRUE;
 }
 
+
+/* ============================================================================
+ * [2026-01-28] DDS 工作模式相关函数实现
+ * ============================================================================ */
+
+/* 全局运行模式（调试模式 or 工作模式）*/
+static RunMode S_RunMode = RUN_MODE_DEBUG;  /* 默认调试模式 */
+
+/* [DDS] 设置运行模式 */
+EC_T_VOID MT_SetRunMode(RunMode mode)
+{
+    S_RunMode = mode;
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "[DDS] Run mode set to: %s\n", 
+        (mode == RUN_MODE_DEBUG) ? "DEBUG" : "WORK"));
+}
+
+/* [DDS] 获取运行模式 */
+RunMode MT_GetRunMode(EC_T_VOID)
+{
+    return S_RunMode;
+}
+
+/* [DDS] CRC32 校验函数
+ * 和 stark_sdk_cpp 中的 Crc32Core 保持一致
+ */
+uint32_t MT_Crc32(uint32_t* ptr, uint32_t len)
+{
+    uint32_t xbit = 0;
+    uint32_t data = 0;
+    uint32_t CRC32 = 0xFFFFFFFF;
+    const uint32_t dwPolynomial = 0x04c11db7;
+    
+    for (uint32_t i = 0; i < len; i++) {
+        xbit = 1 << 31;
+        data = ptr[i];
+        for (uint32_t bits = 0; bits < 32; bits++) {
+            if (CRC32 & 0x80000000) {
+                CRC32 <<= 1;
+                CRC32 ^= dwPolynomial;
+            } else {
+                CRC32 <<= 1;
+            }
+            if (data & xbit) {
+                CRC32 ^= dwPolynomial;
+            }
+            xbit >>= 1;
+        }
+    }
+    return CRC32;
+}
+
+/* [DDS] 单个电机命令转换：DDS_MotorCmd -> MotorCmd_
+ * 
+ * 转换说明：
+ *   - DDS 的 mode 字段：0=关闭, 1=使能
+ *   - 内部的 motion_func：根据 mode 设置为 SHUTDOWN 或 CONTROL
+ *   - 内部的 drive_mode：使用全局驱动模式（调试模式下可设置，默认CSP）
+ */
+EC_T_VOID MT_ConvertDDSCmdToMotorCmd(const DDS_MotorCmd* pDDSCmd, MotorCmd_* pMotorCmd, DriveMode driveMode)
+{
+    if (pDDSCmd == EC_NULL || pMotorCmd == EC_NULL) {
+        return;
+    }
+    
+    /* 清空目标结构体 */
+    OsMemset(pMotorCmd, 0, sizeof(MotorCmd_));
+    
+    /* 设置驱动模式（使用传入的模式，通常是全局模式）*/
+    pMotorCmd->drive_mode = (EC_T_BYTE)driveMode;
+    
+    /* 根据 DDS mode 字段设置 motion_func
+     * DDS mode: 0=关闭, 1=使能
+     * 内部 motion_func: MOTION_SHUTDOWN / MOTION_CONTROL
+     */
+    if (pDDSCmd->mode == 0) {
+        pMotorCmd->motion_func = MOTION_SHUTDOWN;
+    } else {
+        pMotorCmd->motion_func = MOTION_CONTROL;
+    }
+    
+    /* 复制控制参数 */
+    pMotorCmd->q   = (EC_T_REAL)pDDSCmd->q;    /* 目标位置 */
+    pMotorCmd->dq  = (EC_T_REAL)pDDSCmd->dq;   /* 目标速度 */
+    pMotorCmd->tau = (EC_T_REAL)pDDSCmd->tau;  /* 前馈力矩 */
+    pMotorCmd->kp  = (EC_T_REAL)pDDSCmd->kp;   /* 刚度 */
+    pMotorCmd->kd  = (EC_T_REAL)pDDSCmd->kd;   /* 阻尼 */
+    
+    /* 方向默认为正向（DDS 没有 direction 字段）*/
+    pMotorCmd->direction = 0;
+}
+
+/* [DDS] 单个电机状态转换：MotorState_ -> DDS_MotorState */
+EC_T_VOID MT_ConvertMotorStateToDDS(const MotorState_* pMotorState, DDS_MotorState* pDDSState)
+{
+    if (pMotorState == EC_NULL || pDDSState == EC_NULL) {
+        return;
+    }
+    
+    /* 清空目标结构体 */
+    OsMemset(pDDSState, 0, sizeof(DDS_MotorState));
+    
+    /* 复制状态数据 */
+    pDDSState->mode       = pMotorState->mode;
+    pDDSState->q          = pMotorState->q_fb;       /* 实际位置 */
+    pDDSState->dq         = pMotorState->dq_fb;      /* 实际速度 */
+    pDDSState->ddq        = pMotorState->ddq_fb;     /* 实际加速度 */
+    pDDSState->tau_est    = pMotorState->tau_fb;     /* 估计力矩 */
+    pDDSState->vol        = pMotorState->vol;        /* 母线电压 */
+    pDDSState->motorstate = pMotorState->motorstate; /* 状态字 */
+    
+    /* 温度 */
+    pDDSState->temperature[0] = (int16_t)pMotorState->temperature[0];
+    pDDSState->temperature[1] = (int16_t)pMotorState->temperature[1];
+    
+    /* 传感器数据 */
+    pDDSState->sensor[0] = pMotorState->sensor[0];
+    pDDSState->sensor[1] = pMotorState->sensor[1];
+}
+
+/* [DDS] 处理 DDS 命令
+ * 
+ * 功能：
+ *   1. 校验 CRC
+ *   2. 提取 motor_cmd[14]~[20]（第15-21个电机）
+ *   3. 转换并写入内部 MotorCmd_[0]~[6]
+ * 
+ * 索引映射：
+ *   DDS 索引 14 -> 内部索引 0 -> 轴1
+ *   DDS 索引 15 -> 内部索引 1 -> 轴2
+ *   ...
+ *   DDS 索引 20 -> 内部索引 6 -> 轴7
+ */
+EC_T_BOOL MT_ProcessDDSCommand(const DDS_LowCmd* pDDSCmd)
+{
+    if (pDDSCmd == EC_NULL) {
+        return EC_FALSE;
+    }
+    
+    /* 1. CRC 校验
+     * 计算除 crc 字段外的所有数据的 CRC32
+     * 数据长度 = (结构体大小 / 4) - 1（减去 crc 字段）
+     */
+    uint32_t calcCrc = MT_Crc32((uint32_t*)pDDSCmd, 
+                                 (sizeof(DDS_LowCmd) / sizeof(uint32_t)) - 1);
+    if (calcCrc != pDDSCmd->crc) {
+        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
+            "[DDS] CRC check failed! Expected: 0x%08X, Got: 0x%08X\n",
+            calcCrc, pDDSCmd->crc));
+        return EC_FALSE;
+    }
+    
+    /* 2. 获取当前全局驱动模式（调试模式下可设置，默认CSP）*/
+    DriveMode driveMode = MT_GetGlobalDriveMode();
+    
+    /* 3. 遍历我们使用的电机，进行索引映射和命令转换
+     * DDS 索引: DDS_MOTOR_OFFSET + i = 14 + i
+     * 内部索引: i = 0 ~ 6
+     */
+    for (int i = 0; i < DDS_MOTOR_USED; i++) {
+        int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 数组索引: 14, 15, ..., 20 */
+        
+        /* 转换 DDS 命令到内部格式 */
+        MotorCmd_ motorCmd;
+        MT_ConvertDDSCmdToMotorCmd(&pDDSCmd->motor_cmd[ddsIndex], &motorCmd, driveMode);
+        
+        /* 写入内部命令缓冲区（内部索引: 0, 1, ..., 6）*/
+        MT_SetMotorCmd((EC_T_WORD)i, &motorCmd);
+    }
+    
+    return EC_TRUE;
+}
+
+/* [DDS] 获取 DDS 状态
+ * 
+ * 功能：
+ *   1. 从内部 MotorState_[0]~[6] 读取状态
+ *   2. 填充到 DDS_LowState 的 motor_state[14]~[20]
+ *   3. 计算并填充 CRC
+ */
+EC_T_VOID MT_GetDDSState(DDS_LowState* pDDSState)
+{
+    if (pDDSState == EC_NULL) {
+        return;
+    }
+    
+    /* 清空结构体 */
+    OsMemset(pDDSState, 0, sizeof(DDS_LowState));
+    
+    /* 填充版本信息（可根据需要修改）*/
+    pDDSState->version[0] = 1;
+    pDDSState->version[1] = 0;
+    
+    /* 填充模式信息 */
+    pDDSState->mode_pr = 0;
+    pDDSState->mode_machine = (uint8_t)MT_GetRunMode();
+    
+    /* TODO: 填充 tick（时间戳）*/
+    static uint32_t s_tick = 0;
+    pDDSState->tick = s_tick++;
+    
+    /* 遍历我们使用的电机，进行状态转换
+     * 内部索引: i = 0 ~ 6
+     * DDS 索引: DDS_MOTOR_OFFSET + i = 14 + i
+     */
+    for (int i = 0; i < DDS_MOTOR_USED; i++) {
+        int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 数组索引: 14, 15, ..., 20 */
+        
+        /* 获取内部电机状态 */
+        MotorState_ motorState;
+        MT_GetMotorState((EC_T_WORD)i, &motorState);
+        
+        /* 转换到 DDS 格式 */
+        MT_ConvertMotorStateToDDS(&motorState, &pDDSState->motor_state[ddsIndex]);
+    }
+    
+    /* 计算并填充 CRC */
+    pDDSState->crc = MT_Crc32((uint32_t*)pDDSState, 
+                               (sizeof(DDS_LowState) / sizeof(uint32_t)) - 1);
+}
+
 /*--------------------------------------------------------------------------------END
  * OF SOURCE
  * FILE----------------------------------------------------------------------*/
