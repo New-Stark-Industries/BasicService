@@ -7,13 +7,13 @@ BUILD_DIR="$PROJECT_ROOT/build-aarch64"
 
 # 板子配置
 BOARD_USER="stark"
-BOARD_IP="192.168.31.214"
+BOARD_IP="10.45.106.70"
 BOARD_SRC_DIR="~/src/BasicService"
 BOARD_BUILD_DIR="~/src/BasicService/build"
 
 # 板子上的运行配置
 ECMASTER_LIB_PATH="/home/stark/src/EC-Master/Bin/Linux/aarch64"
-ENI_FILE="/home/stark/src/EC-Master/eni.xml"
+ENI_FILE="/home/stark/src/BasicService/conf/eni.xml"
 DEMO_BIN_DIR="${BOARD_BUILD_DIR}/third_party/ecmaster_demo"
 
 cd "$PROJECT_ROOT"
@@ -47,10 +47,21 @@ elif [ "$1" = "r" ]; then
             -t 0"
 elif [ "$1" = "c" ]; then
     rm -rf "$BUILD_DIR"
+elif [ "$1" = "d" ]; then
+    # 下载标定文件
+    echo "=== 下载标定文件 cfg.json ==="
+    scp ${BOARD_USER}@${BOARD_IP}:${BOARD_SRC_DIR}/conf/cfg.json ~/Desktop/
+    if [ $? -eq 0 ]; then
+        echo "=== 标定文件已保存到桌面 ==="
+        cat ~/Desktop/cfg.json
+    else
+        echo "=== 下载失败，请检查文件是否存在 ==="
+    fi
 else
-    echo "Usage: $0 {b|s|r|c}"
+    echo "Usage: $0 {b|s|r|c|d}"
     echo "  b - Build (cross-compile for aarch64)"
     echo "  s - Sync code and binary to board"
     echo "  r - Run on board (via SSH)"
     echo "  c - Clean build directory"
+    echo "  d - Download cfg.json to Desktop"
 fi

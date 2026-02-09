@@ -27,5 +27,5 @@
  * @brief framework build time.
  *
  */
-#define APP_BUILD_TIME "2026-01-28 16:57:33"
+#define APP_BUILD_TIME "2026-02-09 16:08:58"
 

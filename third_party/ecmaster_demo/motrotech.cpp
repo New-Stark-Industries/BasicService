@@ -1652,6 +1652,174 @@ EC_T_BOOL MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_L
     return EC_TRUE;
 }
 
+/* ============================================================================
+ * [2026-01-27] MT_SetHomingMethod35 - 将当前位置设置为零点
+ * 
+ * 功能：通过 SDO 写入 Homing Method = 35，将驱动器当前位置设为零点
+ * 
+ * CiA 402 Homing 状态机流程：
+ *   1. 切换到 Homing 模式 (0x6060 = 6)
+ *   2. 设置 Homing Method = 35
+ *   3. 状态机切换：Shutdown -> Switch On -> Enable Operation
+ *   4. 发送 Homing Start (ControlWord bit 4 = 1)
+ *   5. 等待 Homing Attained (StatusWord bit 12 = 1) 或超时
+ *   6. 切换回 CSP 模式
+ * 
+ * 参数：
+ *   wAxis - 轴号 (0-13)
+ * 
+ * 返回：
+ *   EC_TRUE  - 设置成功
+ *   EC_FALSE - 设置失败
+ * ============================================================================ */
+EC_T_BOOL MT_SetHomingMethod35(EC_T_WORD wAxis)
+{
+    if (wAxis >= MotorCount) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetHomingMethod35: Invalid axis %d (max=%d)\n", wAxis, MotorCount - 1));
+        return EC_FALSE;
+    }
+    
+    My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
+    EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+    if (dwSlaveId == INVALID_SLAVE_ID) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetHomingMethod35: Axis %d - cannot find slave\n", wAxis));
+        return EC_FALSE;
+    }
+    
+    if (pDemoAxis->pwControlWord == EC_NULL || pDemoAxis->pwStatusWord == EC_NULL) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "MT_SetHomingMethod35: Axis %d - PDO not mapped\n", wAxis));
+        return EC_FALSE;
+    }
+    
+    EC_T_DWORD dwRes;
+    EC_T_WORD wStatusWord;
+    
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Starting Homing Method 35 (keep enabled)...\n", wAxis));
+    
+    /* === 保持使能状态下执行 Homing === */
+    
+    /* 1. 设置 0x6098 = 35 (Homing Method = 当前位置为原点) */
+    EC_T_SBYTE byMethod = 35;
+    dwRes = ecatCoeSdoDownload(dwSlaveId, 0x6098, 0,
+        (EC_T_BYTE*)&byMethod, sizeof(byMethod), SDO_TIMEOUT, 0);
+    if (dwRes != EC_E_NOERROR) {
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+            "Axis[%d] Failed to set 0x6098=35: 0x%08X\n", wAxis, dwRes));
+        return EC_FALSE;
+    }
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Step 1: 0x6098 = 35 (Homing Method)\n", wAxis));
+    
+    /* 2. 【关键修复】切换 eModesOfOperation 为 Homing，让 PDO 周期写入也发 Homing 模式
+     *    之前的 bug：只通过 SDO 写 0x6060=6，但 MT_Workpd() 每周期通过 PDO 写 0x6060=CSP(8)，
+     *    导致 SDO 设置被立即覆盖，驱动器始终没有真正进入 Homing 模式。
+     */
+    MC_T_CIA402_OPMODE eOldMode = pDemoAxis->eModesOfOperation;
+    pDemoAxis->eModesOfOperation = DRV_MODE_OP_HOMING;  /* PDO 周期写入也切换到 Homing */
+    OsSleep(100);  /* 等几个周期让 PDO 生效 */
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Step 2: eModesOfOperation = 6 (Homing Mode via PDO)\n", wAxis));
+    
+    /* 3. 确保处于 Operation Enabled 状态 */
+    EC_SETWORD(pDemoAxis->pwControlWord, 0x000F);
+    OsSleep(100);
+    
+    /* 4. 启动 Homing (ControlWord bit 4 = 1) */
+    EC_SETWORD(pDemoAxis->pwControlWord, 0x001F);
+    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+        "Axis[%d] Step 4: Homing started (ControlWord=0x001F)\n", wAxis));
+    
+    /* 5. 等待 Homing 完成（两阶段检测，避免 CSP 模式下 bit12 残留导致假阳性）
+     *
+     * 问题背景：
+     *   - 在 CSP 模式下，StatusWord bit12 = 1 表示 "drive follows command"
+     *   - 切换到 Homing 模式后，bit12 含义变为 "Homing Attained"
+     *   - 如果不等 bit12 先清零，会误判为 Homing 已完成（假阳性）
+     *
+     * 方案：
+     *   阶段1：等待 bit12 变为 0（确认驱动器已切换到 Homing 模式，旧 bit12 已清除）
+     *   阶段2：等待 bit12 变为 1（真正的 Homing Attained）
+     */
+    int timeout_ms = 5000;
+    int elapsed = 0;
+    EC_T_BOOL bHomingOk = EC_FALSE;
+    
+    /* 阶段1：等待 bit12 清零（最多等 1 秒，某些驱动可能直接跳过） */
+    EC_T_BOOL bBit12Cleared = EC_FALSE;
+    while (elapsed < 1000) {
+        OsSleep(20);
+        elapsed += 20;
+        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
+        if (!(wStatusWord & 0x1000)) {
+            bBit12Cleared = EC_TRUE;
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Axis[%d] Homing bit12 cleared, StatusWord=0x%04X (%dms)\n", wAxis, wStatusWord, elapsed));
+            break;
+        }
+        /* Homing error (bit 13 = 1) */
+        if (wStatusWord & 0x2000) {
+            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+                "Axis[%d] Homing error during phase1! StatusWord=0x%04X\n", wAxis, wStatusWord));
+            break;
+        }
+    }
+    if (!bBit12Cleared) {
+        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
+            "Axis[%d] bit12 did not clear in 1s (StatusWord=0x%04X), continue waiting for homing...\n", wAxis, wStatusWord));
+    }
+    
+    /* 阶段2：等待 bit12 置位（Homing Attained） */
+    while (elapsed < timeout_ms) {
+        OsSleep(50);
+        elapsed += 50;
+        
+        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
+        
+        if (wStatusWord & 0x1000) {
+            bHomingOk = EC_TRUE;
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Axis[%d] Homing attained! StatusWord=0x%04X (elapsed=%dms)\n", wAxis, wStatusWord, elapsed));
+            break;
+        }
+        
+        /* Homing error (bit 13 = 1) */
+        if (wStatusWord & 0x2000) {
+            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+                "Axis[%d] Homing error! StatusWord=0x%04X\n", wAxis, wStatusWord));
+            break;
+        }
+    }
+    
+    if (!bHomingOk && elapsed >= timeout_ms) {
+        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
+        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
+            "Axis[%d] Homing timeout, StatusWord=0x%04X\n", wAxis, wStatusWord));
+    }
+    
+    /* 6. 恢复 CSP 模式（通过 eModesOfOperation，让 PDO 周期写入也切回 CSP）*/
+    pDemoAxis->eModesOfOperation = eOldMode;
+    OsSleep(100);  /* 等几个周期让 PDO 生效 */
+    
+    /* 7. 重新使能 */
+    EC_SETWORD(pDemoAxis->pwControlWord, 0x0006);
+    OsSleep(50);
+    EC_SETWORD(pDemoAxis->pwControlWord, 0x0007);
+    OsSleep(50);
+    EC_SETWORD(pDemoAxis->pwControlWord, 0x000F);
+    OsSleep(100);
+    
+    if (bHomingOk) {
+        EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+            "Axis[%d] Homing Method 35 completed - position should now be zero\n", wAxis));
+    }
+    
+    return bHomingOk;
+}
+
 
 /* ============================================================================
  * [2026-01-28] DDS 工作模式相关函数实现

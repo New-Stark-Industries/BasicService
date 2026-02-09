@@ -62,8 +62,9 @@ static void DDSTestThreadFunc() {
     
     /* 初始参数 */
     float amplitudes[7] = {0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f}; /* 振幅 (rad) */
-    float frequencies[7] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}; /* 频率 (Hz) */
-    float centers[7] = {0};
+    float frequencies[14] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
+                              0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}; /* 频率 (Hz) */
+    float centers[14] = {0};
     bool initialized = false;
     
     auto next_wake = std::chrono::steady_clock::now();
@@ -73,7 +74,7 @@ static void DDSTestThreadFunc() {
     while (g_bDDSTestRunning) {
         /* 1. 初始化中心位置（第一次运行时）*/
         if (!initialized) {
-            for (int i = 0; i < 7; i++) {
+            for (int i = 0; i < 14; i++) {
                 MotorState_ st;
                 if (MT_GetMotorState((EC_T_WORD)i, &st)) {
                     centers[i] = st.q_fb;
@@ -82,7 +83,7 @@ static void DDSTestThreadFunc() {
                 }
             }
             initialized = true;
-            printf("[DDS Test] 初始化完成，以当前位置为中心开始运动\n");
+            printf("[DDS Test] 初始化完成，以当前位置为中心开始运动 (14轴)\n");
         }
         
         /* 2. 构造 DDS 命令 */
@@ -91,14 +92,16 @@ static void DDSTestThreadFunc() {
         
         DriveMode currentMode = MT_GetGlobalDriveMode();
         
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 14; i++) {
             int ddsIndex = DDS_MOTOR_OFFSET + i;
             
             /* 计算正弦波目标: q = center + A * sin(2*pi*f*t) */
             /* 稍微错开相位，让动作看起来自然点 */
             float phase = i * 0.5f; 
-            float targetQ = centers[i] + amplitudes[i] * sin(2 * 3.14159f * frequencies[i] * t + phase);
-            float targetDQ = amplitudes[i] * 2 * 3.14159f * frequencies[i] * cos(2 * 3.14159f * frequencies[i] * t + phase);
+            float amp = amplitudes[i % 7];  /* 使用前7个振幅配置，左右臂相同 */
+            float freq = frequencies[i];
+            float targetQ = centers[i] + amp * sin(2 * 3.14159f * freq * t + phase);
+            float targetDQ = amp * 2 * 3.14159f * freq * cos(2 * 3.14159f * freq * t + phase);
             
             ddsCmd.motor_cmd[ddsIndex].mode = (uint8_t)currentMode;
             ddsCmd.motor_cmd[ddsIndex].q    = targetQ;
@@ -132,8 +135,9 @@ static void DDSTestThreadFunc() {
 
 
 /*-DEFINES-------------------------------------------------------------------*/
-#define CALIB_FILE_NAME "robot_calib.json"
-#define TOTAL_JOINTS 7
+// 配置文件路径（相对于程序运行目录 build/third_party/ecmaster_demo）
+#define CALIB_FILE_NAME "../../../conf/cfg.json"
+#define TOTAL_JOINTS 14  // 左臂 7 个 + 右臂 7 个
 
 /*-CALIBRATION DATA----------------------------------------------------------*/
 // 全局标定数据结构（所有参数从 JSON 文件读取）
@@ -237,6 +241,9 @@ static void ParseJsonString(const std::string& content, size_t start_pos, const 
 }
 
 // JSON 解析函数：从文件读取所有标定参数
+// 支持两种格式：
+//   1. cfg.json 格式（新）: actuators.joints[], index=15-21 (DDS索引)
+//   2. robot_calib.json 格式（旧）: robot_calibration.joints[], index=1-7
 static bool LoadCalibrationFile(const char* filename)
 {
     std::ifstream file(filename);
@@ -250,30 +257,51 @@ static bool LoadCalibrationFile(const char* filename)
     std::string content = buffer.str();
     file.close();
     
+    // 检测文件格式：cfg.json 包含 "actuators"，robot_calib.json 包含 "robot_calibration"
+    bool is_cfg_format = (content.find("\"actuators\"") != std::string::npos);
+    
     // 读取关节总数
+    // cfg.json 格式没有 total_joints 字段，默认 7 个 EtherCAT 关节
     g_CalibData.total_joints = ParseJsonInt(content, 0, "total_joints");
     if (g_CalibData.total_joints <= 0 || g_CalibData.total_joints > TOTAL_JOINTS) {
-        printf("[标定] 错误: 无效的关节总数 %d\n", g_CalibData.total_joints);
-        return false;
+        g_CalibData.total_joints = TOTAL_JOINTS;  // 默认 7 个关节
     }
     
     printf("[标定] 关节总数: %d\n", g_CalibData.total_joints);
+    printf("[标定] 文件格式: %s\n", is_cfg_format ? "cfg.json" : "robot_calib.json");
     
     // 解析每个关节的数据
     for (int i = 0; i < g_CalibData.total_joints; i++) {
-        // 查找 "index": i+1 对应的关节块
+        // 根据格式确定搜索的索引值
+        // cfg.json: DDS 索引 15-21 对应内部 0-6
+        // robot_calib.json: 索引 1-7 对应内部 0-6
+        int search_index = is_cfg_format ? (i + 15) : (i + 1);
+        
         char search_pattern[64];
-        snprintf(search_pattern, sizeof(search_pattern), "\"index\": %d", i + 1);
+        snprintf(search_pattern, sizeof(search_pattern), "\"index\": %d", search_index);
         
         size_t idx_pos = content.find(search_pattern);
         if (idx_pos == std::string::npos) {
-            printf("[标定] 错误: 找不到关节 %d 的数据\n", i + 1);
+            // 尝试不带空格的格式
+            snprintf(search_pattern, sizeof(search_pattern), "\"index\":%d", search_index);
+            idx_pos = content.find(search_pattern);
+        }
+        
+        if (idx_pos == std::string::npos) {
+            printf("[标定] 错误: 找不到关节 index=%d (内部索引 %d) 的数据\n", search_index, i);
             return false;
         }
         
         // 读取各字段
         ParseJsonString(content, idx_pos, "name", g_CalibData.joint_names[i], 32);
-        ParseJsonString(content, idx_pos, "communication", g_CalibData.communication[i], 32);
+        
+        // cfg.json 使用 "bus_type"，robot_calib.json 使用 "communication"
+        if (is_cfg_format) {
+            ParseJsonString(content, idx_pos, "bus_type", g_CalibData.communication[i], 32);
+        } else {
+            ParseJsonString(content, idx_pos, "communication", g_CalibData.communication[i], 32);
+        }
+        
         g_CalibData.calib_positions[i] = ParseJsonFloat(content, idx_pos, "position");
         g_CalibData.directions[i] = ParseJsonInt(content, idx_pos, "direction");
         g_CalibData.range_min[i] = ParseJsonFloat(content, idx_pos, "range_min");
@@ -1509,9 +1537,9 @@ static EC_T_DWORD myAppPrepare(T_EC_DEMO_APP_CONTEXT* pAppContext)
 
     if (EC_NULL != pAppContext->AppParms.pbyCnfData)
     {
-        /* [修改] 增加到 7 个电机，站号从 1001 到 1007 */
-        for (int i = 0; i < 7; i++) {
-            My_Slave[i].wStationAddress = (EC_T_WORD)(1001 + i);
+        /* [修改] 14 个电机，站号从 1002 到 1015（跳过 1001 非电机从站） */
+        for (int i = 0; i < 14; i++) {
+            My_Slave[i].wStationAddress = (EC_T_WORD)(1002 + i);
             My_Slave[i].wAxisCnt = 1;
         }
 
@@ -1760,6 +1788,12 @@ static void* CmdThread(void*)
         line[strcspn(line, "\r\n")] = 0;
         if (strcmp(line, "2") == 0) {
             runModeChoice = 2;
+        } else if (strcmp(line, "1") == 0) {
+            runModeChoice = 1;
+        } else if (strlen(line) > 0) {
+            /* 输入了其他内容，给出提示 */
+            printf("[系统] 无效输入 '%s'，默认选择调试模式 (1)\n", line);
+            runModeChoice = 1;
         }
     }
     
@@ -1823,6 +1857,7 @@ static void* CmdThread(void*)
     printf("  show                                        显示所有轴位置\n");
     printf("  get <axis>                                  获取单轴详细状态\n");
     printf("  home                                        回零\n");
+    printf("  setcenter                                   运动到中心点并设为零点\n");
     printf("  calib                                       标定\n");
     printf("  torque <axis> <tau> <kp> <q> <kd> <dq>       阻抗控制/PT模式\n");
     printf("\n[CMD] === DDS 测试 ===\n");
@@ -1864,7 +1899,8 @@ static void* CmdThread(void*)
             printf("║              tau=目标力矩(N.m)                                   ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【运动功能】                                                     ║\n");
-            printf("║   home                   回零（顺序：7→1）                       ║\n");
+            printf("║   home                   回零（顺序：14→1）                      ║\n");
+            printf("║   setcenter              运动到中心点并设为零点 (14轴)           ║\n");
             printf("║   aging <axis> <speed>   老化测试                                ║\n");
             printf("║   calib                  标定（记录负极限位置）                  ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
@@ -1872,14 +1908,13 @@ static void* CmdThread(void*)
             printf("║   show                   显示所有轴位置                          ║\n");
             printf("║   get <axis>             获取单轴详细状态                        ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
-            printf("║ 【DDS 调试】 模拟 DDS 通讯（一帧7轴数据）                        ║\n");
+            printf("║ 【DDS 调试】 模拟 DDS 通讯（一帧14轴数据）                       ║\n");
             printf("║   dds                    发送一帧（使用当前位置）                ║\n");
-            printf("║   dds <q1> <q2> .. <q7>  发送一帧（指定7轴目标位置）             ║\n");
-            printf("║     示例: dds 3.0 2.9 1.6 -1.5 -2.5 0.0 2.8  (回零点附近)        ║\n");
+            printf("║   dds <q1>..<q14>        发送一帧（指定14轴目标位置）            ║\n");
             printf("║   dds_state / ds         查看 DDS 格式的电机状态                 ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【参数说明】                                                     ║\n");
-            printf("║   <axis>  轴号 1-7                                               ║\n");
+            printf("║   <axis>  轴号 1-14（左臂1-7, 右臂8-14）                         ║\n");
             printf("║   <q>     位置，单位 rad                                         ║\n");
             printf("║   <dq>    速度，单位 rad/s                                       ║\n");
             printf("║   <tau>   力矩，单位 N.m                                         ║\n");
@@ -1893,48 +1928,48 @@ static void* CmdThread(void*)
 
         /* [2026-01-23] 紧急停止：所有轴立即停止 */
         if (strcmp(line, "estop") == 0 || strcmp(line, "e") == 0) {
-            printf("\n[ESTOP] !!! 紧急停止 - 所有轴停机 !!!\n");
-            for (int i = 0; i < 7; i++) {
+            printf("\n[ESTOP] !!! 紧急停止 - 所有 14 轴停机 !!!\n");
+            for (int i = 0; i < 14; i++) {
                 MotorCmd_ cmd{};
                 cmd.motion_func = MOTION_SHUTDOWN;
                 MT_SetMotorCmd((EC_T_WORD)i, &cmd);
             }
-            printf("[ESTOP] 所有轴已释放\n\n");
+            printf("[ESTOP] 所有 14 轴已释放\n\n");
             fflush(stdout);
             continue;
         }
 
         /* ============================================================================
-         * [2026-01-28] DDS 模拟命令：模拟一帧完整的 DDS 数据（同时控制 7 个轴）
+         * [2026-01-28] DDS 模拟命令：模拟一帧完整的 DDS 数据（同时控制 14 个轴）
          * 
-         * 命令格式：dds <q1> <q2> <q3> <q4> <q5> <q6> <q7>
-         *   q1~q7: 轴1~轴7的目标位置 (rad)
+         * 命令格式：dds <q1> ... <q14>
+         *   q1~q14: 轴1~轴14的目标位置 (rad)（左臂1-7，右臂8-14）
          * 
          * 或者：dds（不带参数）
          *   使用当前位置作为目标，测试 DDS 数据流
          * 
-         * 功能：构造一帧完整的 DDS_LowCmd，包含所有 7 个电机的命令
-         * 索引映射：轴1-7 对应 DDS 索引 14-20
+         * 功能：构造一帧完整的 DDS_LowCmd，包含所有 14 个电机的命令
+         * 索引映射：轴1-14 对应 DDS 索引 15-28
          * ============================================================================ */
         if (strcmp(line, "dds") == 0 || strncmp(line, "dds ", 4) == 0) {
-            float targetPos[7] = {0};  /* 7 个轴的目标位置 */
-            float targetVel = 0.5f;    /* 默认速度 */
+            float targetPos[14] = {0};  /* 14 个轴的目标位置 */
+            float targetVel = 0.5f;     /* 默认速度 */
             EC_T_BOOL useCurrentPos = EC_TRUE;  /* 是否使用当前位置 */
             
-            /* 解析参数：如果提供了 7 个位置值则使用，否则用当前位置 */
+            /* 解析参数：如果提供了 14 个位置值则使用，否则用当前位置 */
             if (strlen(line) > 4) {
-                int parsed = sscanf(line + 4, "%f %f %f %f %f %f %f",
+                int parsed = sscanf(line + 4, "%f %f %f %f %f %f %f %f %f %f %f %f %f %f",
                                     &targetPos[0], &targetPos[1], &targetPos[2],
                                     &targetPos[3], &targetPos[4], &targetPos[5],
-                                    &targetPos[6]);
-                if (parsed == 7) {
+                                    &targetPos[6], &targetPos[7], &targetPos[8],
+                                    &targetPos[9], &targetPos[10], &targetPos[11],
+                                    &targetPos[12], &targetPos[13]);
+                if (parsed == 14) {
                     useCurrentPos = EC_FALSE;
-                } else if (parsed > 0 && parsed < 7) {
-                    printf("[DDS] 错误：需要提供 7 个位置值，或不提供任何参数\n");
-                    printf("  用法: dds                                    (使用当前位置)\n");
-                    printf("  用法: dds <q1> <q2> <q3> <q4> <q5> <q6> <q7>\n");
-                    printf("  提示: 零点由标定数据计算，不是 0。先运行 home 查看各轴零点\n");
-                    printf("  示例: dds 3.0 2.9 1.6 -1.5 -2.5 0.0 2.8    (回零点附近)\n");
+                } else if (parsed > 0 && parsed < 14) {
+                    printf("[DDS] 错误：需要提供 14 个位置值，或不提供任何参数\n");
+                    printf("  用法: dds                              (使用当前位置)\n");
+                    printf("  用法: dds <q1> <q2> ... <q14>          (指定14轴位置)\n");
                     fflush(stdout);
                     continue;
                 }
@@ -1942,7 +1977,7 @@ static void* CmdThread(void*)
             
             /* 如果使用当前位置，先获取当前状态 */
             if (useCurrentPos) {
-                for (int i = 0; i < 7; i++) {
+                for (int i = 0; i < 14; i++) {
                     MotorState_ state;
                     MT_GetMotorState((EC_T_WORD)i, &state);
                     targetPos[i] = state.q_fb;
@@ -1956,9 +1991,9 @@ static void* CmdThread(void*)
             /* 获取当前全局驱动模式 */
             DriveMode currentMode = MT_GetGlobalDriveMode();
             
-            /* 填充 7 个电机的命令（DDS 索引 14-20）*/
-            for (int i = 0; i < 7; i++) {
-                int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 索引: 14, 15, ..., 20 */
+            /* 填充 14 个电机的命令（DDS 索引 15-28）*/
+            for (int i = 0; i < 14; i++) {
+                int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 索引: 15, 16, ..., 28 */
                 
                 ddsCmd.motor_cmd[ddsIndex].mode = (uint8_t)currentMode;
                 ddsCmd.motor_cmd[ddsIndex].q    = targetPos[i];
@@ -1983,27 +2018,27 @@ static void* CmdThread(void*)
             
             /* 打印模拟的 DDS 帧信息 */
             printf("\n");
-            printf("╔══════════════════════════════════════════════════════════════════╗\n");
-            printf("║              [DDS 模拟] 发送一帧完整数据                         ║\n");
-            printf("╠══════════════════════════════════════════════════════════════════╣\n");
-            printf("║  驱动模式: %-10s                                            ║\n", MT_GetDriveModeName(currentMode));
-            printf("║  数据来源: %s                                          ║\n", useCurrentPos ? "当前位置" : "用户输入");
-            printf("║  CRC32:    0x%08X                                            ║\n", ddsCmd.crc);
-            printf("╠══════════════════════════════════════════════════════════════════╣\n");
-            printf("║  轴号  DDS索引   目标位置(rad)   目标速度(rad/s)                 ║\n");
-            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n");
+            printf("║                  [DDS 模拟] 发送一帧完整数据 (14轴)                           ║\n");
+            printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n");
+            printf("║  驱动模式: %-10s   数据来源: %s   CRC32: 0x%08X           ║\n", 
+                   MT_GetDriveModeName(currentMode), useCurrentPos ? "当前位置" : "用户输入", ddsCmd.crc);
+            printf("╠═══════════════════════════════════╦═══════════════════════════════════════════╣\n");
+            printf("║      Left Arm (轴 1-7)            ║         Right Arm (轴 8-14)               ║\n");
+            printf("╠═══════════════════════════════════╬═══════════════════════════════════════════╣\n");
             for (int i = 0; i < 7; i++) {
-                int ddsIndex = DDS_MOTOR_OFFSET + i;
-                printf("║   %d      %2d       %8.4f         %6.2f                       ║\n",
-                       i + 1, ddsIndex, targetPos[i], targetVel);
+                int ddsL = DDS_MOTOR_OFFSET + i;
+                int ddsR = DDS_MOTOR_OFFSET + i + 7;
+                printf("║  Axis %2d (DDS %2d): %8.4f rad  ║  Axis %2d (DDS %2d): %8.4f rad         ║\n",
+                       i + 1, ddsL, targetPos[i], i + 8, ddsR, targetPos[i + 7]);
             }
-            printf("╚══════════════════════════════════════════════════════════════════╝\n");
+            printf("╚═══════════════════════════════════╩═══════════════════════════════════════════╝\n");
             
             /* 调用 DDS 命令处理函数 */
             EC_T_BOOL result = MT_ProcessDDSCommand(&ddsCmd);
             
             if (result) {
-                printf("[DDS 模拟] 一帧数据处理成功! (7 个电机命令已下发)\n");
+                printf("[DDS 模拟] 一帧数据处理成功! (14 个电机命令已下发)\n");
             } else {
                 printf("[DDS 模拟] 数据处理失败（CRC 错误或其他问题）\n");
             }
@@ -2045,22 +2080,23 @@ static void* CmdThread(void*)
             DDS_LowState ddsState;
             MT_GetDDSState(&ddsState);
             
-            printf("\n[DDS 状态] 当前电机状态 (DDS格式):\n");
-            printf("  运行模式: %s\n", (ddsState.mode_machine == RUN_MODE_DEBUG) ? "调试" : "工作");
-            printf("  CRC32: 0x%08X\n", ddsState.crc);
-            printf("  ─────────────────────────────────────────────────────────\n");
-            printf("  轴号  DDS索引   位置(rad)    速度(rad/s)   力矩(N.m)\n");
-            printf("  ─────────────────────────────────────────────────────────\n");
+            printf("\n╔═══════════════════════════════════════════════════════════════════════════════╗\n");
+            printf("║                  [DDS 状态] 当前电机状态 (14轴)                               ║\n");
+            printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n");
+            printf("║  运行模式: %s     CRC32: 0x%08X                                        ║\n", 
+                   (ddsState.mode_machine == RUN_MODE_DEBUG) ? "调试" : "工作", ddsState.crc);
+            printf("╠═══════════════════════════════════╦═══════════════════════════════════════════╣\n");
+            printf("║      Left Arm (轴 1-7)            ║         Right Arm (轴 8-14)               ║\n");
+            printf("╠═══════════════════════════════════╬═══════════════════════════════════════════╣\n");
             
-            for (int i = 0; i < DDS_MOTOR_USED; i++) {
-                int ddsIdx = DDS_MOTOR_OFFSET + i;
-                printf("   %d      %2d      %8.4f     %8.4f     %8.4f\n",
-                       i + 1, ddsIdx,
-                       ddsState.motor_state[ddsIdx].q,
-                       ddsState.motor_state[ddsIdx].dq,
-                       ddsState.motor_state[ddsIdx].tau_est);
+            for (int i = 0; i < 7; i++) {
+                int ddsL = DDS_MOTOR_OFFSET + i;
+                int ddsR = DDS_MOTOR_OFFSET + i + 7;
+                printf("║  Axis %2d: %7.3f rad %6.2f τ   ║  Axis %2d: %7.3f rad %6.2f τ            ║\n",
+                       i + 1, ddsState.motor_state[ddsL].q, ddsState.motor_state[ddsL].tau_est,
+                       i + 8, ddsState.motor_state[ddsR].q, ddsState.motor_state[ddsR].tau_est);
             }
-            printf("  ─────────────────────────────────────────────────────────\n");
+            printf("╚═══════════════════════════════════╩═══════════════════════════════════════════╝");
             printf("\n");
             fflush(stdout);
             continue;
@@ -2091,16 +2127,31 @@ static void* CmdThread(void*)
             continue;
         }
 
-        /* [2026-01-20] 一键查看所有轴位置 (显示为 1-7 号轴) */
+        /* [2026-01-20] 一键查看所有轴位置 (14轴: 左臂1-7, 右臂8-14) */
         if (strcmp(line, "show") == 0) {
-            printf("\n[CMD] --- Current 7-Axis Positions (rad) ---\n");
+            printf("\n[CMD] ========== Current 14-Axis Positions (rad) ==========\n");
+            printf("       Left Arm (1-7)              Right Arm (8-14)\n");
+            printf("  -------------------------   -------------------------\n");
             for (int i = 0; i < 7; i++) {
-                MotorState_ st;
-                if (MT_GetMotorState((EC_T_WORD)i, &st)) {
-                    printf("  Axis %d: %8.4f\n", i + 1, st.q_fb);
+                MotorState_ stL, stR;
+                bool gotL = MT_GetMotorState((EC_T_WORD)i, &stL);
+                bool gotR = MT_GetMotorState((EC_T_WORD)(i + 7), &stR);
+                
+                // 左臂
+                if (gotL) {
+                    printf("  Axis %2d: %8.4f rad", i + 1, stL.q_fb);
+                } else {
+                    printf("  Axis %2d:   ----   ", i + 1);
+                }
+                printf("   |   ");
+                // 右臂
+                if (gotR) {
+                    printf("Axis %2d: %8.4f rad\n", i + 8, stR.q_fb);
+                } else {
+                    printf("Axis %2d:   ----   \n", i + 8);
                 }
             }
-            printf("--------------------------------------------\n");
+            printf("  =========================================================\n");
             fflush(stdout);
             continue;
         }
@@ -2209,7 +2260,8 @@ static void* CmdThread(void*)
         /* [2026-01-22] 标定命令：读取 7 个关节位置并生成 JSON 文件 */
         if (strcmp(line, "calib") == 0) {
             printf("\n[标定] ========================================\n");
-            printf("[标定] 请将 7 个关节手动反转到【负向极限】位置\n");
+            printf("[标定] 将标定 EtherCAT 左臂 7 个关节 (index 15-21)\n");
+            printf("[标定] 请将 arm_j1_l ~ arm_j7_l 手动反转到【负向极限】位置\n");
             printf("[标定] 完成后输入 ok 确认: ");
             fflush(stdout);
             
@@ -2219,57 +2271,117 @@ static void* CmdThread(void*)
                 if (strcmp(confirm, "ok") == 0) {
                     printf("[标定] 正在读取关节位置...\n");
                     
-                    // 7 个关节的固定参数 (URDF 命名)
-                    const char* joint_names[7] = {"arm_j1_l", "arm_j2_l", "arm_j3_l", "arm_j4_l", "arm_j5_l", "arm_j6_l", "arm_j7_l"};
-                    const int directions[7] = {-1, -1, 0, -1 , 0, 0, 0};  // 0=正向, -1=负向
-                    const float range_min[7] = {-1.43f, -0.91f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f};
-                    const float range_max[7] = { 3.53f,  1.78f,  0.82f,  0.30f,  1.61f,  0.35f,  1.61f};
-                    const int total_joints = 7;
+                    // ========== 28 个关节的完整定义 ==========
+                    const int TOTAL_DOF = 28;
+                    const char* all_joint_names[TOTAL_DOF] = {
+                        // 1-4: 转向关节
+                        "sw1_steer_lf_joint", "sw1_steer_rf_joint", "sw1_steer_lb_joint", "sw1_steer_rb_joint",
+                        // 5-8: 车轮关节
+                        "sw1_wheel_lf_joint", "sw1_wheel_rf_joint", "sw1_wheel_lb_joint", "sw1_wheel_rb_joint",
+                        // 9-11: 腰部关节
+                        "sw1_waist_joint1", "sw1_waist_joint2", "sw1_waist_joint3",
+                        // 12: 躯干关节
+                        "sw1_body_joint",
+                        // 13-14: 头部关节
+                        "sw1_head_joint1", "sw1_head_joint2",
+                        // 15-21: 左臂关节 (EtherCAT 可标定)
+                        "arm_j1_l", "arm_j2_l", "arm_j3_l", "arm_j4_l", "arm_j5_l", "arm_j6_l", "arm_j7_l",
+                        // 22-28: 右臂关节
+                        "arm_j1_r", "arm_j2_r", "arm_j3_r", "arm_j4_r", "arm_j5_r", "arm_j6_r", "arm_j7_r"
+                    };
                     
-                    // 读取实际位置
-                    float positions[7];
-                    for (int i = 0; i < total_joints; i++) {
+                    // 只有 15-21 号关节（索引 14-20）有有效参数，其他为 0
+                    // 索引 14-20 对应 arm_j1_l ~ arm_j7_l
+                    const int directions[TOTAL_DOF] = {
+                        0, 0, 0, 0,     // 1-4: 转向
+                        0, 0, 0, 0,     // 5-8: 车轮
+                        0, 0, 0,        // 9-11: 腰部
+                        0,              // 12: 躯干
+                        0, 0,           // 13-14: 头部
+                        -1, -1, 0, -1, 0, 0, -1,  // 15-21: 左臂 (EtherCAT)
+                        0, 0, -1, 0, -1, -1, 0,      // 22-28: 右臂
+                    };
+                    
+                    const float range_min[TOTAL_DOF] = {
+                        0, 0, 0, 0,     // 1-4
+                        0, 0, 0, 0,     // 5-8
+                        0, 0, 0,        // 9-11
+                        0,              // 12
+                        0, 0,           // 13-14
+                        -1.43f, -0.91f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f,  // 15-21: 左臂
+                        -1.43f, -0.91f, -0.82f, -2.39f, -1.61f, -0.35f, -1.61f  // 22-28
+                    };
+                    
+                    const float range_max[TOTAL_DOF] = {
+                        0, 0, 0, 0,     // 1-4
+                        0, 0, 0, 0,     // 5-8
+                        0, 0, 0,        // 9-11
+                        0,              // 12
+                        0, 0,           // 13-14
+                        3.53f, 1.78f, 1.25f, 0.30f, 1.61f, 0.35f, 1.61f,  // 15-21: 左臂
+                        3.53f, 1.78f, 1.25f, 0.30f, 1.61f, 0.35f, 1.61f  // 22-28
+                    };
+                    
+                    // 所有关节的位置（只有 15-27 从电机读取，其他为 0）
+                    float positions[TOTAL_DOF] = {0};
+                    
+                    // 读取 EtherCAT 关节位置（索引 14-27，对应 DDS 15-28）
+                    const int ETHERCAT_START = 14;  // 数组索引，对应 DDS index 15
+                    const int ETHERCAT_COUNT = 14;
+                    
+                    for (int i = 0; i < ETHERCAT_COUNT; i++) {
                         MotorState_ st;
                         if (MT_GetMotorState((EC_T_WORD)i, &st)) {
-                            positions[i] = st.q_fb;
-                            printf("[标定] %s: %.4f rad\n", joint_names[i], positions[i]);
+                            positions[ETHERCAT_START + i] = st.q_fb;
+                            printf("[标定] %s (index %d): %.4f rad\n", 
+                                   all_joint_names[ETHERCAT_START + i], ETHERCAT_START + i + 1, st.q_fb);
                         } else {
-                            positions[i] = 0.0f;
-                            printf("[标定] %s: 读取失败，使用 0.0\n", joint_names[i]);
+                            positions[ETHERCAT_START + i] = 0.0f;
+                            printf("[标定] %s: 读取失败，使用 0.0\n", all_joint_names[ETHERCAT_START + i]);
                         }
                     }
                     
-                    // 生成 JSON 文件
-                    std::ofstream json("robot_calib.json");
+                    // 生成 cfg.json：写入全部 28 个关节（1-14 用默认值，15-27 用电机标定值）
+                    printf("[标定] 正在写入 %s，共 %d 个关节（含 1-14 其他关节）\n", CALIB_FILE_NAME, TOTAL_DOF);
+                    
+                    std::ofstream json(CALIB_FILE_NAME);
                     if (json.is_open()) {
-                        // 获取当前时间
+                        // 获取当前时间戳
                         time_t now = time(nullptr);
-                        char timebuf[64];
-                        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
                         
                         json << "{\n";
-                        json << "  \"robot_calibration\": {\n";
-                        json << "    \"total_joints\": " << total_joints << ",\n";
-                        json << "    \"timestamp\": \"" << timebuf << "\",\n";
+                        json << "  \"machine_name\": \"scout-w1\",\n";
+                        json << "  \"dof\": " << TOTAL_DOF << ",\n";
+                        json << "  \"actuators\": {\n";
+                        json << "    \"celebration_state\": false,\n";
+                        json << "    \"timestamp\": " << now << ",\n";
                         json << "    \"joints\": [\n";
                         
-                        for (int i = 0; i < total_joints; i++) {
+                        for (int i = 0; i < TOTAL_DOF; i++) {
+                            // DDS 索引从 1 开始
+                            int dds_index = i + 1;
+                            
+                            // 确定 bus_type 和 motor_type
+                            const char* bus_type = (i >= 14 && i <= 27) ? "ethercat" : "can";
+                            const char* motor_type = (i >= 14 && i <= 27) ? "tc" : "unknown";
+                            
                             json << "      {\n";
-                            json << "        \"index\": " << (i + 1) << ",\n";
-                            json << "        \"name\": \"" << joint_names[i] << "\",\n";
-                            json << "        \"communication\": \"EtherCAT\",\n";
+                            json << "        \"index\": " << dds_index << ",\n";
+                            json << "        \"name\": \"" << all_joint_names[i] << "\",\n";
+                            json << "        \"bus_type\": \"" << bus_type << "\",\n";
+                            json << "        \"motor_type\": \"" << motor_type << "\",\n";
                             json << "        \"position\": " << positions[i] << ",\n";
                             json << "        \"direction\": " << directions[i] << ",\n";
                             json << "        \"range_min\": " << range_min[i] << ",\n";
                             json << "        \"range_max\": " << range_max[i] << "\n";
-                            json << "      }" << (i < total_joints - 1 ? "," : "") << "\n";
+                            json << "      }" << (i < TOTAL_DOF - 1 ? "," : "") << "\n";
                         }
                         
                         json << "    ]\n";
                         json << "  }\n";
                         json << "}\n";
                         json.close();
-                        printf("[标定] 已生成配置文件: %s\n", CALIB_FILE_NAME);
+                        printf("[标定] 已生成配置文件: %s (共 %d 个关节)\n", CALIB_FILE_NAME, TOTAL_DOF);
                         
                         // [2026-01-22] 生成后自动加载标定数据
                         printf("[标定] 正在加载标定数据...\n");
@@ -2441,6 +2553,174 @@ static void* CmdThread(void*)
             fflush(stdout);
             continue;
         }
+
+        /* ============================================================================
+         * [2026-01-27] setcenter 命令：运动到关节中心点并设置为零点
+         * 
+         * 前提：当前位置在负极限
+         * 计算：中心点 = 当前位置 ± (|range_min| + |range_max|) / 2
+         *       direction = 0 时用 +，direction = -1 时用 -
+         * 流程：
+         *   1. 计算中心点位置
+         *   2. 逐轴运动到中心点
+         *   3. 到达后使用 Homing Method 35 将当前位置设为零点
+         * ============================================================================ */
+        if (strcmp(line, "setcenter") == 0 || strcmp(line, "setcenter 14") == 0) {
+            printf("\n╔══════════════════════════════════════════════════════════════════╗\n");
+            printf("║              [设置中心点] 将关节运动到中心位置并设为零点          ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            
+            // 检查是否已加载标定数据
+            if (!g_CalibData.loaded) {
+                printf("║ 错误: 未加载标定数据！请先确保 cfg.json 文件存在                ║\n");
+                printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
+                fflush(stdout);
+                continue;
+            }
+            
+            // 计算中心点位置
+            float center_positions[TOTAL_JOINTS];
+            printf("║ 计算各轴中心点位置...                                            ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║  轴号   当前位置    偏移量     目标中心点   方向                  ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            
+            for (int i = 0; i < g_CalibData.total_joints; i++) {
+                MotorState_ st;
+                MT_GetMotorState((EC_T_WORD)i, &st);
+                float current_pos = st.q_fb;
+                
+                // 偏移量 = (|range_min| + |range_max|) / 2
+                float range_min_abs = g_CalibData.range_min[i];
+                if (range_min_abs < 0) range_min_abs = -range_min_abs;
+                float range_max_abs = g_CalibData.range_max[i];
+                if (range_max_abs < 0) range_max_abs = -range_max_abs;
+                float offset = (range_min_abs + range_max_abs) / 2.0f;
+                
+                // 根据 direction 决定方向
+                if (g_CalibData.directions[i] == 0) {
+                    center_positions[i] = current_pos + offset;
+                } else {
+                    center_positions[i] = current_pos - offset;
+                }
+                
+                printf("║  %2d    %8.4f   %8.4f   %8.4f      %s              ║\n",
+                       i + 1, current_pos, offset, center_positions[i],
+                       (g_CalibData.directions[i] == 0) ? "+" : "-");
+            }
+            
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 即将执行：                                                        ║\n");
+            printf("║   1. 逐轴运动到中心点 (速度 0.5 rad/s)                           ║\n");
+            printf("║   2. 到达后使用 Homing Method 35 设置为零点                      ║\n");
+            printf("╠══════════════════════════════════════════════════════════════════╣\n");
+            printf("║ 按回车开始，或输入 cancel 取消: ");
+            fflush(stdout);
+            
+            char confirm[64];
+            if (fgets(confirm, sizeof(confirm), stdin) != nullptr) {
+                confirm[strcspn(confirm, "\r\n")] = 0;
+                if (strcmp(confirm, "cancel") == 0) {
+                    printf("║ 已取消                                                          ║\n");
+                    printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
+                } else {
+                    printf("╠══════════════════════════════════════════════════════════════════╣\n");
+                    
+                    // 逐轴运动到中心点
+                    for (int i = 0; i < g_CalibData.total_joints; i++) {
+                        int axis_num = i + 1;
+                        printf("║ [轴 %2d] 开始运动到中心点...                                     ║\n", axis_num);
+                        fflush(stdout);
+                        
+                        // 获取当前位置（保持电机使能状态）
+                        MotorState_ st;
+                        MT_GetMotorState((EC_T_WORD)i, &st);
+                        float actual_pos = st.q_fb;
+                        
+                        // 计算目标位置
+                        float target = center_positions[i];
+                        
+                        printf("║   当前位置: %8.4f, 目标位置: %8.4f                      ║\n", actual_pos, target);
+                        fflush(stdout);
+                        
+                        // 直接设置目标位置运动
+                        MotorCmd_ cmd{};
+                        cmd.q = target;
+                        cmd.dq = 1.5f;  // 适中速度（原 0.5 太慢）
+                        cmd.kp = 15.0f; // 降低刚度（原 32 太硬，运动时力太大）
+                        cmd.kd = 10.0f; // 降低阻尼（原 30 太硬）
+                        cmd.direction = (EC_T_SBYTE)g_CalibData.directions[i];
+                        cmd.drive_mode = MT_GetGlobalDriveMode();
+                        cmd.motion_func = MOTION_CONTROL;
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                        int timeout = 30000;  // 30 秒超时
+                        int elapsed = 0;
+                        float last_pos = st.q_fb;
+                        int stuck_count = 0;
+                        
+                        while (elapsed < timeout) {
+                            OsSleep(100);
+                            elapsed += 100;
+                            MT_GetMotorState((EC_T_WORD)i, &st);
+                            float error = st.q_fb - target;
+                            if (error < 0) error = -error;
+                            
+                            if (elapsed % 2000 == 0) {
+                                printf("║   当前: %8.4f, 目标: %8.4f, 误差: %.4f                  ║\n",
+                                       st.q_fb, target, error);
+                                fflush(stdout);
+                            }
+                            
+                            if (error < 0.02f) {
+                                printf("║ [轴 %2d] ✓ 已到达中心点: %.4f rad                             ║\n",
+                                       axis_num, st.q_fb);
+                                break;
+                            }
+                            
+                            // 检测卡住
+                            float pos_change = st.q_fb - last_pos;
+                            if (pos_change < 0) pos_change = -pos_change;
+                            if (pos_change < 0.001f) {
+                                stuck_count++;
+                                if (stuck_count >= 30) {
+                                    printf("║ [轴 %2d] ⚠ 运动超时，当前: %.4f                              ║\n",
+                                           axis_num, st.q_fb);
+                                    break;
+                                }
+                            } else {
+                                stuck_count = 0;
+                                last_pos = st.q_fb;
+                            }
+                        }
+                        
+                        // 到达后设置为零点
+                        printf("║ [轴 %2d] 设置当前位置为零点 (Homing Method 35)...               ║\n", axis_num);
+                        fflush(stdout);
+                        
+                        if (MT_SetHomingMethod35((EC_T_WORD)i)) {
+                            printf("║ [轴 %2d] ✓ 零点设置成功                                        ║\n", axis_num);
+                        } else {
+                            printf("║ [轴 %2d] ✗ 零点设置失败                                        ║\n", axis_num);
+                        }
+                        
+                        // 停留在当前位置，dq=0
+                        MT_GetMotorState((EC_T_WORD)i, &st);
+                        cmd.q = st.q_fb;
+                        cmd.dq = 0.0f;
+                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
+                        
+                        OsSleep(200);
+                    }
+                    
+                    printf("╠══════════════════════════════════════════════════════════════════╣\n");
+                    printf("║ 设置中心点完成！所有轴已在中心位置，零点已重置。                 ║\n");
+                }
+            }
+            printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
+            fflush(stdout);
+            continue;
+        }
+
 
         if (strncmp(line, "disable ", 8) == 0) {
             int axis = 0;

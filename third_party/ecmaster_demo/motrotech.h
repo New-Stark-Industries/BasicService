@@ -125,7 +125,7 @@ typedef struct _DDS_MotorState
  */
 #define DDS_MOTOR_COUNT   28    /* DDS 传输的电机总数 */
 #define DDS_MOTOR_OFFSET  15    /* 我们使用的电机起始索引 */
-#define DDS_MOTOR_USED    7     /* 我们实际使用的电机数量 (15-21) */
+#define DDS_MOTOR_USED    14    /* 我们实际使用的电机数量 (15-28) */
 
 typedef struct _DDS_LowCmd
 {
@@ -185,8 +185,8 @@ typedef struct _MotorState_
 #define MOTROTECH_VERS_SERVICEPACK     6   /* service pack */           
 #define MOTROTECH_VERS_BUILD           0   /* build number */   
 
-#define MAX_SLAVE_NUM             8
-#define MAX_AXIS_NUM              8
+#define MAX_SLAVE_NUM             16   // 支持最多 16 个从站
+#define MAX_AXIS_NUM              16   // 支持最多 16 个轴
 
 /* 一个 slave 上可能有多个轴（多轴伺服/多通道），该示例用 “对象索引 + 轴号 * OBJOFFSET” 来区分各轴对象 */
 #define OBJOFFSET                 0x800
@@ -513,6 +513,11 @@ EC_T_BOOL  MT_SetAxisUnitScale(EC_T_WORD wAxis, EC_T_LREAL encoder_cpr, EC_T_LRE
  * 参数单位：弧度 (rad)，函数内部自动转换为编码器计数 (PUU)
  */
 EC_T_BOOL  MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_LREAL fMaxLimitRad);
+
+/* [2026-01-27] 将当前位置设置为零点 (Homing Method 35)
+ * 用于 setcenter 命令：运动到中心点后调用此函数
+ */
+EC_T_BOOL  MT_SetHomingMethod35(EC_T_WORD wAxis);
 
 
 /* ============================================================================
