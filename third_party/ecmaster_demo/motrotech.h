@@ -463,6 +463,7 @@ typedef struct _Motor_Type
     EC_T_LREAL          fLimitMin;    /* [2026-01-20] 软件左限位 */
     EC_T_LREAL          fLimitMax;    /* [2026-01-20] 软件右限位 */
     EC_T_BOOL           bLimitValid;  /* 限位是否已示教有效 */
+    EC_T_INT            sdwZeroOffset;  /* [2026-02-10] 软件零点偏移（PUU），标定后赋值 */
     /*-扭矩控制 (PT模式)--------------------------------------------------------*/
     EC_T_LREAL  fRatedTorque;         /* 额定扭矩 (N·m)，从 0x6076 读取 */
 } My_Motor_Type;
@@ -518,6 +519,7 @@ EC_T_BOOL  MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_
  * 用于 setcenter 命令：运动到中心点后调用此函数
  */
 EC_T_BOOL  MT_SetHomingMethod35(EC_T_WORD wAxis);
+EC_T_VOID  MT_ResetPositionSync(EC_T_WORD wAxis);
 
 
 /* ============================================================================

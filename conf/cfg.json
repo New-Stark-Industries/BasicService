@@ -3,53 +3,53 @@
   "dof": 28,
   "actuators": {
     "celebration_state": false,
-    "timestamp": 1770606309,
+    "timestamp": 1771039398,
     "joints": [
       {
         "index": 1,
         "name": "sw1_steer_lf_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
-        "range_min": 0,
-        "range_max": 0
+        "range_min": -2.88,
+        "range_max": 2.88
       },
       {
         "index": 2,
         "name": "sw1_steer_rf_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
-        "range_min": 0,
-        "range_max": 0
+        "range_min": -2.88,
+        "range_max": 2.88
       },
       {
         "index": 3,
         "name": "sw1_steer_lb_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
-        "range_min": 0,
-        "range_max": 0
+        "range_min": -2.88,
+        "range_max": 2.88
       },
       {
         "index": 4,
         "name": "sw1_steer_rb_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
-        "range_min": 0,
-        "range_max": 0
+        "range_min": -2.88,
+        "range_max": 2.88
       },
       {
         "index": 5,
         "name": "sw1_wheel_lf_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
         "range_min": 0,
@@ -59,7 +59,7 @@
         "index": 6,
         "name": "sw1_wheel_rf_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
         "range_min": 0,
@@ -69,7 +69,7 @@
         "index": 7,
         "name": "sw1_wheel_lb_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
         "range_min": 0,
@@ -79,7 +79,7 @@
         "index": 8,
         "name": "sw1_wheel_rb_joint",
         "bus_type": "can",
-        "motor_type": "unknown",
+        "motor_type": "bk",
         "position": 0,
         "direction": 0,
         "range_min": 0,
@@ -150,7 +150,7 @@
         "name": "arm_j1_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.00192649,
+        "position": 2.4824,
         "direction": -1,
         "range_min": -1.43,
         "range_max": 3.53
@@ -160,7 +160,7 @@
         "name": "arm_j2_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": -2.38263,
+        "position": 1.33683,
         "direction": -1,
         "range_min": -0.91,
         "range_max": 1.78
@@ -170,7 +170,7 @@
         "name": "arm_j3_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.773762,
+        "position": -1.03415,
         "direction": 0,
         "range_min": -0.82,
         "range_max": 1.25
@@ -180,7 +180,7 @@
         "name": "arm_j4_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.881924,
+        "position": 1.34319,
         "direction": -1,
         "range_min": -2.39,
         "range_max": 0.3
@@ -190,7 +190,7 @@
         "name": "arm_j5_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": -0.892822,
+        "position": -1.61116,
         "direction": 0,
         "range_min": -1.61,
         "range_max": 1.61
@@ -200,7 +200,7 @@
         "name": "arm_j6_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.391516,
+        "position": -0.351906,
         "direction": 0,
         "range_min": -0.35,
         "range_max": 0.35
@@ -210,7 +210,7 @@
         "name": "arm_j7_l",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 1.32049,
+        "position": 1.60792,
         "direction": -1,
         "range_min": -1.61,
         "range_max": 1.61
@@ -220,7 +220,7 @@
         "name": "arm_j1_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": -2.62782,
+        "position": -2.47884,
         "direction": 0,
         "range_min": -1.43,
         "range_max": 3.53
@@ -230,7 +230,7 @@
         "name": "arm_j2_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.683405,
+        "position": -1.34033,
         "direction": 0,
         "range_min": -0.91,
         "range_max": 1.78
@@ -240,7 +240,7 @@
         "name": "arm_j3_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 0.215628,
+        "position": 1.15285,
         "direction": -1,
         "range_min": -0.82,
         "range_max": 1.25
@@ -250,7 +250,7 @@
         "name": "arm_j4_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 2.97517,
+        "position": -1.34212,
         "direction": 0,
         "range_min": -2.39,
         "range_max": 0.3
@@ -260,7 +260,7 @@
         "name": "arm_j5_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": -2.22411,
+        "position": -0.00129857,
         "direction": -1,
         "range_min": -1.61,
         "range_max": 1.61
@@ -270,7 +270,7 @@
         "name": "arm_j6_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": -0.0886928,
+        "position": 0.350317,
         "direction": -1,
         "range_min": -0.35,
         "range_max": 0.35
@@ -280,7 +280,7 @@
         "name": "arm_j7_r",
         "bus_type": "ethercat",
         "motor_type": "tc",
-        "position": 1.01324,
+        "position": -1.60845,
         "direction": 0,
         "range_min": -1.61,
         "range_max": 1.61

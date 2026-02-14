@@ -128,6 +128,8 @@ static volatile eStateCmd S_ProcessState[MAX_AXIS_NUM];
 static MotorCmd_           S_MotorCmd[MAX_AXIS_NUM];
 static EC_T_BOOL           S_MotorCmdValid[MAX_AXIS_NUM];
 static MotorState_         S_MotorState[MAX_AXIS_NUM];
+/* 位置同步标记：首次使能时同步 fCurPos 到实际位置 */
+static EC_T_BOOL           S_FirstEnable[MAX_AXIS_NUM] = { EC_FALSE };
 /* 总线周期时间（秒），在 MT_Setup() 里由 dwBusCycleTimeUsec 计算出来 */
 static EC_T_LREAL fTimeSec = 0.0000;
 
@@ -879,8 +881,9 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
       st.mode = *pDemoAxis->pbyModeOfOperation; 
     }
     if (pDemoAxis->pnActPosition) {
-      /* [2026-01-19] 作用：把 0x6064(ActualPosition, int32 PUU) 换算成 rad 回填 */
-      st.q_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActPosition) * pDemoAxis->fRadPerCnt);
+      /* [2026-01-19] 作用：把 0x6064(ActualPosition, int32 PUU) 换算成 rad 回填
+       * [2026-02-10] 减去软件零点偏移：物理编码器值不变，用偏移实现"虚拟零点" */
+      st.q_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActPosition - pDemoAxis->sdwZeroOffset) * pDemoAxis->fRadPerCnt);
     }
     if (pDemoAxis->pnActVelocity) {
       /* [2026-01-19] 作用：把 0x606C(ActualVelocity, int32 PUU/s) 换算成 rad/s 回填 */
@@ -927,9 +930,8 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
       cmd = S_MotorCmd[i];
     }
     /* [2026-01-19] 优化：手动模式下增加平滑移动逻辑，防止突跳并实现到达即停 */
-    static EC_T_BOOL bFirstEnable[MAX_AXIS_NUM] = { EC_FALSE };
     if (pDemoAxis->wActState != DRV_DEV_STATE_OP_ENABLED) {
-        bFirstEnable[i] = EC_FALSE; // 未使能时，重置同步标记
+        S_FirstEnable[i] = EC_FALSE; // 未使能时，重置同步标记
     }
 
     /* [2026-01-23] 重构：基于 motion_func 和 drive_mode 的控制逻辑 */
@@ -942,9 +944,9 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     }
     /* ===== MOTION_AGING: 老化测试 ===== */
     else if (bHaveCmd && (cmd.motion_func == MOTION_AGING) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
-      if (!bFirstEnable[i]) {
+      if (!S_FirstEnable[i]) {
           pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
-          bFirstEnable[i] = EC_TRUE;
+          S_FirstEnable[i] = EC_TRUE;
       }
 
       // 获取限位范围
@@ -999,9 +1001,9 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     /* ===== MOTION_CONTROL: 正常控制（PT/CSP/CST）===== */
     else if (bHaveCmd && (cmd.motion_func == MOTION_CONTROL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
       // 同步初始位置
-      if (!bFirstEnable[i]) {
+      if (!S_FirstEnable[i]) {
           pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
-          bFirstEnable[i] = EC_TRUE;
+          S_FirstEnable[i] = EC_TRUE;
           EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "Axis %d: Position Sync to %d (x1000)\n", i, (EC_T_INT)(pDemoAxis->fCurPos*1000)));
       }
 
@@ -1045,9 +1047,13 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
           const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
           EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
         }
+        /* [修复] VelocityOffset(0x60B1) 是 CSP 的速度前馈，不应写 cmd.dq（那是插补限速）。
+         *  之前 cmd.dq=0.3 * fCntPerRad ≈ 50 万 counts/s 被写入前馈，
+         *  电机到位后 TargetPosition 不变但前馈仍在，导致重力关节乱动。
+         *  修复：CSP 模式下 VelocityOffset 置 0，由驱动器位置环自行处理。
+         */
         if (pDemoAxis->pnVelocityOffset != EC_NULL) {
-          const EC_T_LREAL dq_cnt = (EC_T_LREAL)cmd.dq * pDemoAxis->fCntPerRad;
-          EC_SETDWORD(pDemoAxis->pnVelocityOffset, MtSatToInt32(dq_cnt));
+          EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
         }
         if (pDemoAxis->pwTorqueOffset != EC_NULL) {
           const EC_T_SWORD tau_raw = (EC_T_SWORD)(cmd.tau * 1000.0f);
@@ -1080,102 +1086,35 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
       if (pDemoAxis->pnTargetVelocity != EC_NULL) {
         EC_SETDWORD(pDemoAxis->pnTargetVelocity, 0);
       }
+      /* [修复] IDLE 时清零前馈，防止从 MOTION_CONTROL 切过来时残留 */
+      if (pDemoAxis->pnVelocityOffset != EC_NULL) {
+        EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+      }
+      if (pDemoAxis->pwTorqueOffset != EC_NULL) {
+        EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
+      }
       pDemoAxis->fCurVel = 0;
-    }
-    /* ===== [已删除] 旧自动模式代码开始 ===== */
-    else if (0) { // 占位，防止编译错误
-      int64_t lPosTmp = 0;
-      switch (pDemoAxis->eMovingStat) {
-      case MOVE_STAT_POS_ACC:
-        /* 正向加速阶段：速度逐步增加到 +MAX_VEL */
-        pDemoAxis->fCurVel += fTimeSec * ACC_DEC;
-        if (pDemoAxis->fCurVel >= MAX_VEL) {
-          pDemoAxis->eMovingStat = MOVE_STAT_POS_CON;
-        }
-        break;
-      case MOVE_STAT_POS_CON:
-        /* 正向匀速阶段：保持 +MAX_VEL 一段时间（用 dwConRunCnt 计数） */
-        pDemoAxis->fCurVel = MAX_VEL;
-        if (pDemoAxis->dwConRunCnt++ > CONRUNSEC / fTimeSec) {
-          pDemoAxis->dwConRunCnt = 0;
-          pDemoAxis->eMovingStat = MOVE_STAT_POS_DEC;
-        }
-        break;
-      case MOVE_STAT_POS_DEC:
-        /* 正向减速阶段：速度逐步减到 0，随后切到反向加速 */
-        pDemoAxis->fCurVel -= fTimeSec * ACC_DEC;
-        if (pDemoAxis->fCurVel <= 0) {
-          pDemoAxis->eMovingStat = MOVE_STAT_NEG_ACC;
-        }
-        break;
-      case MOVE_STAT_NEG_ACC:
-        /* 反向加速阶段：速度逐步降低到 -MAX_VEL */
-        pDemoAxis->fCurVel -= fTimeSec * ACC_DEC;
-        if (pDemoAxis->fCurVel <= -MAX_VEL) {
-          pDemoAxis->eMovingStat = MOVE_STAT_NEG_CON;
-        }
-        break;
-      case MOVE_STAT_NEG_CON:
-        /* 反向匀速阶段：保持 -MAX_VEL 一段时间 */
-        pDemoAxis->fCurVel = -MAX_VEL;
-        if (pDemoAxis->dwConRunCnt++ > CONRUNSEC / fTimeSec) {
-          pDemoAxis->dwConRunCnt = 0;
-          pDemoAxis->eMovingStat = MOVE_STAT_NEG_DEC;
-        }
-        break;
-      case MOVE_STAT_NEG_DEC:
-        /* 反向减速阶段：速度逐步回到 0，随后切回正向加速 */
-        pDemoAxis->fCurVel += fTimeSec * ACC_DEC;
-        if (pDemoAxis->fCurVel >= 0) {
-          pDemoAxis->eMovingStat = MOVE_STAT_POS_ACC;
-        }
-        break;
-      default:
-        /* 异常/未初始化：回到一个确定的初始阶段 */
-        pDemoAxis->fCurVel = 0;
-        pDemoAxis->dwConRunCnt = 0;
-        pDemoAxis->eMovingStat = MOVE_STAT_POS_ACC;
-        break;
-      }
-
-      /* 位置积分：pos += vel * dt
-       * 注意：这里 dt 没有直接用 fTimeSec，而是用一个经验系数 IncFactor。
-       * 真实工程里建议明确单位：pos[count] += vel[count/s] * dt[s]。
-       */
-      pDemoAxis->fCurPos += pDemoAxis->fCurVel * IncFactor;
-
-      /* 写入 PDO：TargetPosition / TargetVelocity /
-       * TargetTorque（如果对应对象已映射） 写入之后并不会立刻到达从站：
-       * - 真正发送发生在 EcMasterJobTask 的 eUsrJob_SendAllCycFrames
-       */
-      if (pDemoAxis->pnTargetPosition != EC_NULL) {
-        /* 写 0x607A TargetPosition（int32）
-         * - 注意：这里写的是“目标”，不是“实际位置”
-         * - EC_SETDWORD：SDK 封装的 32bit 写入（包含必要的对齐/字节序处理）
-         */
-        EC_SETDWORD(pDemoAxis->pnTargetPosition, (EC_T_INT)lPosTmp);
-      }
-      if (pDemoAxis->pnTargetVelocity != EC_NULL) {
-        /* 写 0x60FF TargetVelocity（int32，单位取决于从站定义） */
-        EC_SETDWORD(pDemoAxis->pnTargetVelocity,
-                    (EC_T_INT)(pDemoAxis->fCurVel * INC_PERMM));
-      }
-      /* demo 原本会写死 0x6071 TargetTorque=200；为了避免误触发扭矩指令，这里不再周期写入。 */
     }
     /* ===== 未使能状态：对齐内部位置到实际位置 ===== */
     else {
-      /* 未使能时：把内部状态对齐到实际位置，避免一使能就跳变 */
-      // ... 保持你原来的 else 内容 ...
-      /* 未使能时：把内部状态对齐到实际位置，避免一使能就跳变 */
-      /* 注意：这里默认 pnActPosition 已映射；若未映射会解引用空指针（工程化要加保护）
-       * 实际工程建议：
-       *   if (pnActPosition && pnTargetPosition) { ... } else { 报错/降级 }
+      /* [修复] 使用 fRadPerCnt 换算（与 CSP 模式的 fCntPerRad 互逆），
+       *  之前误用 INC_PERMM=10，与 fCntPerRad 差 17 万倍，
+       *  导致 Fault 恢复后 TargetPosition 暴跳 -> 连锁 Fault。
        */
-      pDemoAxis->fCurPos = (EC_T_LREAL)(*pDemoAxis->pnActPosition) / INC_PERMM;
+      if (pDemoAxis->pnActPosition != EC_NULL) {
+        pDemoAxis->fCurPos = (EC_T_LREAL)(*pDemoAxis->pnActPosition) * pDemoAxis->fRadPerCnt;
+      }
       pDemoAxis->fCurVel = 0;
-      if (pDemoAxis->pnTargetPosition != EC_NULL) {
+      if (pDemoAxis->pnActPosition != EC_NULL && pDemoAxis->pnTargetPosition != EC_NULL) {
         /* 未使能时把目标位置“贴住”实际位置，避免使能瞬间产生大跟随误差 */
         EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
+      }
+      /* 清零所有前馈/偏移量，防止残留值在重新使能时造成跳变 */
+      if (pDemoAxis->pnVelocityOffset != EC_NULL) {
+        EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+      }
+      if (pDemoAxis->pwTorqueOffset != EC_NULL) {
+        EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
       }
     }
 
@@ -1213,41 +1152,53 @@ EC_T_VOID MT_SetMotorCmd(EC_T_WORD wAxis, const MotorCmd_* pCmd)
     return;
   }
 
-  /* [2026-01-19] 目的：处理 kp (0x3500) 和 kd (0x3501) 的 SDO 异步下发
-   * 说明：由于这两个字段是配置类参数，且不支持 PDO 映射，因此需要通过 CoE SDO 下载。
-   * 此函数由交互线程（CmdThread）调用，SDO 写入是阻塞的，但不会影响主控制周期的实时性。
+  /* [2026-02-10] kp/kd SDO 下发逻辑
+   * kp(0x3500) 和 kd(0x3501) 是驱动器位置环增益，通过 CoE SDO 下载。
+   *
+   * 设计要点：
+   *   1. pCmd->kp/kd == 0 视为"不关心"（IDLE/SHUTDOWN 等场景零初始化），
+   *      不触发 SDO，也不覆盖 S_MotorCmd 中缓存的有效值。
+   *   2. 只有 pCmd->kp/kd > 0 且与缓存值不同时才发 SDO。
+   *   3. 缓存值 S_MotorCmd[].kp/kd 只在 SDO 成功后才更新，
+   *      失败时保留旧值以便下次重试。
    */
-  EC_T_DWORD dwSlaveId = ecatGetSlaveId(My_Motor[wAxis].wStationAddress);
+  EC_T_REAL fNewKp = (pCmd->kp > 0) ? pCmd->kp : S_MotorCmd[wAxis].kp;
+  EC_T_REAL fNewKd = (pCmd->kd > 0) ? pCmd->kd : S_MotorCmd[wAxis].kd;
 
-  // 1. 处理 KP 变更
-  if (pCmd->kp != S_MotorCmd[wAxis].kp) {
-      EC_T_REAL fVal = pCmd->kp;
-      // 下载到索引 0x3500, 子索引 0
-      EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId, 0x3500, 0, (EC_T_BYTE*)&fVal, sizeof(EC_T_REAL), 1000, 0);
+  if (fNewKp != S_MotorCmd[wAxis].kp) {
+      EC_T_DWORD dwSlaveId = ecatGetSlaveId(My_Motor[wAxis].wStationAddress);
+      EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId, 0x3500, 0,
+          (EC_T_BYTE*)&fNewKp, sizeof(EC_T_REAL), 1000, 0);
       if (dwRes != EC_E_NOERROR) {
-          EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, 
-              "SDO Write KP(0x3500) failed for axis %d: %s(0x%x)\n", wAxis, ecatGetText(dwRes), dwRes));
+          EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+              "SDO Write KP(0x3500) failed for axis %d: 0x%x\n", wAxis, dwRes));
       } else {
-          /* [2026-01-19] 修正：由于 EcLogMsg 可能不支持浮点格式化，改为打印 10 倍整数 */
-          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "SDO Write KP=%d (x10) to axis %d OK\n", (EC_T_INT)(fVal*10), wAxis));
+          S_MotorCmd[wAxis].kp = fNewKp;
+          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+              "SDO KP=%d (x10) axis %d OK\n", (EC_T_INT)(fNewKp*10), wAxis));
       }
   }
 
-  // 2. 处理 KD 变更
-  if (pCmd->kd != S_MotorCmd[wAxis].kd) {
-      EC_T_REAL fVal = pCmd->kd;
-      // 下载到索引 0x3501, 子索引 0
-      EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId, 0x3501, 0, (EC_T_BYTE*)&fVal, sizeof(EC_T_REAL), 1000, 0);
+  if (fNewKd != S_MotorCmd[wAxis].kd) {
+      EC_T_DWORD dwSlaveId = ecatGetSlaveId(My_Motor[wAxis].wStationAddress);
+      EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId, 0x3501, 0,
+          (EC_T_BYTE*)&fNewKd, sizeof(EC_T_REAL), 1000, 0);
       if (dwRes != EC_E_NOERROR) {
-          EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, 
-              "SDO Write KD(0x3501) failed for axis %d: %s(0x%x)\n", wAxis, ecatGetText(dwRes), dwRes));
+          EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
+              "SDO Write KD(0x3501) failed for axis %d: 0x%x\n", wAxis, dwRes));
       } else {
-          /* [2026-01-19] 修正：由于 EcLogMsg 可能不支持浮点格式化，改为打印 10 倍整数 */
-          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "SDO Write KD=%d (x10) to axis %d OK\n", (EC_T_INT)(fVal*10), wAxis));
+          S_MotorCmd[wAxis].kd = fNewKd;
+          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+              "SDO KD=%d (x10) axis %d OK\n", (EC_T_INT)(fNewKd*10), wAxis));
       }
   }
 
+  /* 写入命令缓冲区（kp/kd 保留有效值，不被零值冲掉） */
+  EC_T_REAL fKeepKp = S_MotorCmd[wAxis].kp;
+  EC_T_REAL fKeepKd = S_MotorCmd[wAxis].kd;
   S_MotorCmd[wAxis] = *pCmd;
+  S_MotorCmd[wAxis].kp = fKeepKp;
+  S_MotorCmd[wAxis].kd = fKeepKd;
   S_MotorCmdValid[wAxis] = EC_TRUE;
 }
 
@@ -1653,20 +1604,25 @@ EC_T_BOOL MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_L
 }
 
 /* ============================================================================
- * [2026-01-27] MT_SetHomingMethod35 - 将当前位置设置为零点
+ * [2026-02-10] MT_SetHomingMethod35 - 通过 SDO 写 0x3801=5 将当前位置设为零点
  * 
- * 功能：通过 SDO 写入 Homing Method = 35，将驱动器当前位置设为零点
+ * 功能：向驱动器写入 0x3801=5，将当前编码器位置设为零点，
+ *       并同步主站内部状态（fCurPos/fCurVel/S_FirstEnable）。
  * 
- * CiA 402 Homing 状态机流程：
- *   1. 切换到 Homing 模式 (0x6060 = 6)
- *   2. 设置 Homing Method = 35
- *   3. 状态机切换：Shutdown -> Switch On -> Enable Operation
- *   4. 发送 Homing Start (ControlWord bit 4 = 1)
- *   5. 等待 Homing Attained (StatusWord bit 12 = 1) 或超时
- *   6. 切换回 CSP 模式
+ * 【重要前提】调用方必须确保：
+ *   1. 该轴已处于 MOTION_IDLE 模式（周期线程做 target=actual，不做位置插补）
+ *   2. 电机已停稳（无运动中）
+ *   否则周期线程会在零设瞬间下发错误的目标位置，导致跳变/抖动。
+ * 
+ * 流程：
+ *   1. 记录归零前的实际位置（日志用）
+ *   2. SDO 下载 0x3801=5 → 驱动器将当前位置设为 0
+ *   3. 同步内部状态：fCurPos=0, fCurVel=0, TargetPosition=0
+ *   4. 重置 S_FirstEnable → 下次进入 MOTION_CONTROL 时从 q_fb 重新同步
+ *   5. 等待驱动器处理并验证
  * 
  * 参数：
- *   wAxis - 轴号 (0-13)
+ *   wAxis - 轴号 (0 ~ MotorCount-1)
  * 
  * 返回：
  *   EC_TRUE  - 设置成功
@@ -1676,148 +1632,72 @@ EC_T_BOOL MT_SetHomingMethod35(EC_T_WORD wAxis)
 {
     if (wAxis >= MotorCount) {
         EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-            "MT_SetHomingMethod35: Invalid axis %d (max=%d)\n", wAxis, MotorCount - 1));
+            "MT_SetZeroPos: Invalid axis %d (max=%d)\n", wAxis, MotorCount - 1));
         return EC_FALSE;
     }
-    
+
     My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
     EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
     if (dwSlaveId == INVALID_SLAVE_ID) {
         EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-            "MT_SetHomingMethod35: Axis %d - cannot find slave\n", wAxis));
+            "MT_SetZeroPos: Axis %d - cannot find slave\n", wAxis));
         return EC_FALSE;
     }
-    
-    if (pDemoAxis->pwControlWord == EC_NULL || pDemoAxis->pwStatusWord == EC_NULL) {
-        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-            "MT_SetHomingMethod35: Axis %d - PDO not mapped\n", wAxis));
-        return EC_FALSE;
+
+    /* 1. 记录归零前的实际位置 */
+    EC_T_SDWORD sdwPosBefore = 0;
+    if (pDemoAxis->pnActPosition) {
+        sdwPosBefore = *pDemoAxis->pnActPosition;
     }
-    
-    EC_T_DWORD dwRes;
-    EC_T_WORD wStatusWord;
-    
     EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-        "Axis[%d] Starting Homing Method 35 (keep enabled)...\n", wAxis));
-    
-    /* === 保持使能状态下执行 Homing === */
-    
-    /* 1. 设置 0x6098 = 35 (Homing Method = 当前位置为原点) */
-    EC_T_SBYTE byMethod = 35;
-    dwRes = ecatCoeSdoDownload(dwSlaveId, 0x6098, 0,
-        (EC_T_BYTE*)&byMethod, sizeof(byMethod), SDO_TIMEOUT, 0);
+        "Axis[%d] SetZero: position before = %ld counts\n", wAxis, (long)sdwPosBefore));
+
+    /* 2. SDO 写 0x3801=5：将驱动器当前位置设为零点 */
+    EC_T_WORD wSetZero = 5;
+    EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId, 0x3801, 0,
+        (EC_T_BYTE*)&wSetZero, sizeof(wSetZero), SDO_TIMEOUT, 0);
     if (dwRes != EC_E_NOERROR) {
         EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-            "Axis[%d] Failed to set 0x6098=35: 0x%08X\n", wAxis, dwRes));
+            "Axis[%d] Failed to write 0x3801=5: 0x%08X\n", wAxis, dwRes));
         return EC_FALSE;
     }
+
+    /* 3. 同步内部位置状态
+     *    驱动器编码器已归零，主站内部也必须归零，
+     *    避免周期线程用旧坐标下发目标导致 Following Error */
+    pDemoAxis->fCurPos = 0.0;
+    pDemoAxis->fCurVel = 0.0;
+    if (pDemoAxis->pnTargetPosition != EC_NULL) {
+        EC_SETDWORD(pDemoAxis->pnTargetPosition, 0);
+    }
+
+    /* 4. 重置位置同步标记
+     *    下次从 IDLE 切回 MOTION_CONTROL 时，fCurPos 会重新同步到
+     *    q_fb（此时已是 0），保证无跳变 */
+    S_FirstEnable[wAxis] = EC_FALSE;
+
+    EC_T_SDWORD sdwPosAfter = 0;
+    if (pDemoAxis->pnActPosition) {
+        sdwPosAfter = *pDemoAxis->pnActPosition;
+    }
     EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-        "Axis[%d] Step 1: 0x6098 = 35 (Homing Method)\n", wAxis));
-    
-    /* 2. 【关键修复】切换 eModesOfOperation 为 Homing，让 PDO 周期写入也发 Homing 模式
-     *    之前的 bug：只通过 SDO 写 0x6060=6，但 MT_Workpd() 每周期通过 PDO 写 0x6060=CSP(8)，
-     *    导致 SDO 设置被立即覆盖，驱动器始终没有真正进入 Homing 模式。
-     */
-    MC_T_CIA402_OPMODE eOldMode = pDemoAxis->eModesOfOperation;
-    pDemoAxis->eModesOfOperation = DRV_MODE_OP_HOMING;  /* PDO 周期写入也切换到 Homing */
-    OsSleep(100);  /* 等几个周期让 PDO 生效 */
-    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-        "Axis[%d] Step 2: eModesOfOperation = 6 (Homing Mode via PDO)\n", wAxis));
-    
-    /* 3. 确保处于 Operation Enabled 状态 */
-    EC_SETWORD(pDemoAxis->pwControlWord, 0x000F);
-    OsSleep(100);
-    
-    /* 4. 启动 Homing (ControlWord bit 4 = 1) */
-    EC_SETWORD(pDemoAxis->pwControlWord, 0x001F);
-    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-        "Axis[%d] Step 4: Homing started (ControlWord=0x001F)\n", wAxis));
-    
-    /* 5. 等待 Homing 完成（两阶段检测，避免 CSP 模式下 bit12 残留导致假阳性）
-     *
-     * 问题背景：
-     *   - 在 CSP 模式下，StatusWord bit12 = 1 表示 "drive follows command"
-     *   - 切换到 Homing 模式后，bit12 含义变为 "Homing Attained"
-     *   - 如果不等 bit12 先清零，会误判为 Homing 已完成（假阳性）
-     *
-     * 方案：
-     *   阶段1：等待 bit12 变为 0（确认驱动器已切换到 Homing 模式，旧 bit12 已清除）
-     *   阶段2：等待 bit12 变为 1（真正的 Homing Attained）
-     */
-    int timeout_ms = 5000;
-    int elapsed = 0;
-    EC_T_BOOL bHomingOk = EC_FALSE;
-    
-    /* 阶段1：等待 bit12 清零（最多等 1 秒，某些驱动可能直接跳过） */
-    EC_T_BOOL bBit12Cleared = EC_FALSE;
-    while (elapsed < 1000) {
-        OsSleep(20);
-        elapsed += 20;
-        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
-        if (!(wStatusWord & 0x1000)) {
-            bBit12Cleared = EC_TRUE;
-            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-                "Axis[%d] Homing bit12 cleared, StatusWord=0x%04X (%dms)\n", wAxis, wStatusWord, elapsed));
-            break;
-        }
-        /* Homing error (bit 13 = 1) */
-        if (wStatusWord & 0x2000) {
-            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-                "Axis[%d] Homing error during phase1! StatusWord=0x%04X\n", wAxis, wStatusWord));
-            break;
-        }
+        "Axis[%d] SetZero done: before=%ld, after=%ld counts\n",
+        wAxis, (long)sdwPosBefore, (long)sdwPosAfter));
+
+    return EC_TRUE;
+}
+
+/* ============================================================================
+ * MT_ResetPositionSync - 重置位置同步标记
+ * 
+ * 调用后，下一个 MOTION_CONTROL 周期会将 fCurPos 重新同步到实际位置 q_fb，
+ * 避免从旧位置开始插补导致跳变/抖动。
+ * ============================================================================ */
+EC_T_VOID MT_ResetPositionSync(EC_T_WORD wAxis)
+{
+    if (wAxis < MAX_AXIS_NUM) {
+        S_FirstEnable[wAxis] = EC_FALSE;
     }
-    if (!bBit12Cleared) {
-        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
-            "Axis[%d] bit12 did not clear in 1s (StatusWord=0x%04X), continue waiting for homing...\n", wAxis, wStatusWord));
-    }
-    
-    /* 阶段2：等待 bit12 置位（Homing Attained） */
-    while (elapsed < timeout_ms) {
-        OsSleep(50);
-        elapsed += 50;
-        
-        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
-        
-        if (wStatusWord & 0x1000) {
-            bHomingOk = EC_TRUE;
-            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-                "Axis[%d] Homing attained! StatusWord=0x%04X (elapsed=%dms)\n", wAxis, wStatusWord, elapsed));
-            break;
-        }
-        
-        /* Homing error (bit 13 = 1) */
-        if (wStatusWord & 0x2000) {
-            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR,
-                "Axis[%d] Homing error! StatusWord=0x%04X\n", wAxis, wStatusWord));
-            break;
-        }
-    }
-    
-    if (!bHomingOk && elapsed >= timeout_ms) {
-        wStatusWord = EC_GETWORD(pDemoAxis->pwStatusWord);
-        EcLogMsg(EC_LOG_LEVEL_WARNING, (pEcLogContext, EC_LOG_LEVEL_WARNING,
-            "Axis[%d] Homing timeout, StatusWord=0x%04X\n", wAxis, wStatusWord));
-    }
-    
-    /* 6. 恢复 CSP 模式（通过 eModesOfOperation，让 PDO 周期写入也切回 CSP）*/
-    pDemoAxis->eModesOfOperation = eOldMode;
-    OsSleep(100);  /* 等几个周期让 PDO 生效 */
-    
-    /* 7. 重新使能 */
-    EC_SETWORD(pDemoAxis->pwControlWord, 0x0006);
-    OsSleep(50);
-    EC_SETWORD(pDemoAxis->pwControlWord, 0x0007);
-    OsSleep(50);
-    EC_SETWORD(pDemoAxis->pwControlWord, 0x000F);
-    OsSleep(100);
-    
-    if (bHomingOk) {
-        EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
-            "Axis[%d] Homing Method 35 completed - position should now be zero\n", wAxis));
-    }
-    
-    return bHomingOk;
 }
 
 
