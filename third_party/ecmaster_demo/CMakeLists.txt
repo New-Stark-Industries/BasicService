@@ -7,6 +7,7 @@ set(ECM_SDK_LIB_DIR "${ECM_SDK_ROOT}/LIB/Linux/aarch64")
 set(ECM_SOURCES
     EcDemoApp.cpp
     motrotech.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../driver/mcu.cpp
     Common/EcDemoParms.cpp
     Common/EcDemoTimingTask.cpp
     Common/EcLogging.cpp
@@ -27,6 +28,7 @@ target_include_directories(ecmaster_demo PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/Common
     ${CMAKE_CURRENT_SOURCE_DIR}/Common/Linux
+    ${CMAKE_CURRENT_SOURCE_DIR}/../driver
 )
 
 target_link_directories(ecmaster_demo PUBLIC ${ECM_SDK_LIB_DIR})
