@@ -35,10 +35,11 @@ FetchContent_Declare(common_util
     GIT_REPOSITORY https://github.com/spencer-luo/common_util.git
     GIT_TAG v1.4.1)
 FetchContent_MakeAvailable(common_util)
-# add dependence library yaml-cpp
+# add dependence library yaml-cpp (patch cmake_minimum_required 3.4->3.5 for modern CMake)
 FetchContent_Declare(yaml-cpp
     GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-    GIT_TAG 0.8.0)
+    GIT_TAG 0.8.0
+    PATCH_COMMAND sed -i "s/VERSION 3.4/VERSION 3.5/" CMakeLists.txt)
 FetchContent_MakeAvailable(yaml-cpp)
 # add dependence library tiny_framework
 FetchContent_Declare(tiny_framework

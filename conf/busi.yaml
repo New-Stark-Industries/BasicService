@@ -1,13 +1,55 @@
 # 业务配置
 test_property: "test property value"
 
-# [2026-01-16] 目的：EC-Master demo 配置（方案1：BasicService 内嵌 demo）
+# EC-Master demo 配置
 ethercat_demo:
-  # 目的：指定 Linux 网卡名（sockraw 模式），例如 "br0"
-  if_name: "br0"
-  # 目的：指定 ENI 文件路径（.xml）
-  eni_path: "conf/arm-b_eni.xml"
-  # 目的：主站周期（微秒）
+  # 链路层驱动参数（程序会在前面加 "-"）
+  # dw3504 硬件网卡（板子实际使用）:
+  link_layer: "dw3504 2 1 custom rk3588s osdriver 0"
+  # sockraw 软件网卡（调试用）:
+  # link_layer: "sockraw enP2p33s0"
+
+  # ENI 文件路径
+  eni_path: "/home/stark/cai/jiont7_B/conf/eni.xml"
+  # 主站周期（微秒）
   cycle_us: 1000
-  # 目的：demo 运行时长（毫秒），0=默认/无限
+  # 运行时长（毫秒），0=无限
   duration_ms: 0
+  # true = 从 cfg.json 读 motor_map（只读一个文件）；false = 从本文件 ethercat_demo.motor_map 读
+  motor_map_from_cfg: true
+
+  # [2026-03-16] 电机映射表（仅当 motor_map_from_cfg 为 false 时使用）
+  # 每项：slave_addr = ENI 中该电机的 PhysAddr（站地址）
+  #        dds_index  = 对应全身第几号电机（DDS motor_state/motor_cmd 的数组索引，从0开始）
+  # 全身28个电机: dds_index 0~27
+  # 只需列出 ENI 里实际有的电机，顺序即为内部轴0,1,2...的顺序
+  #
+
+  #注意：如果电机映射表为空，则默认使用全部电机
+  #注意：修改电机映射表后，最好要去cfg.json中添加对应的电机配置数量
+  # 示例：左臂 7 个电机,  
+  motor_map:
+    - { slave_addr: 1002, dds_index: 14 }
+    # - { slave_addr: 1003, dds_index: 15 }
+    # - { slave_addr: 1004, dds_index: 16 }
+    # - { slave_addr: 1005, dds_index: 17 }
+    # - { slave_addr: 1006, dds_index: 18 }
+    # - { slave_addr: 1007, dds_index: 19 }
+    # - { slave_addr: 1008, dds_index: 20 }
+  #
+  # 示例：全部14个电机
+  # motor_map:
+  #   - { slave_addr: 1002, dds_index: 14 }
+  #   - { slave_addr: 1003, dds_index: 15 }
+  #   - { slave_addr: 1004, dds_index: 16 }
+  #   - { slave_addr: 1005, dds_index: 17 }
+  #   - { slave_addr: 1006, dds_index: 18 }
+  #   - { slave_addr: 1007, dds_index: 19 }
+  #   - { slave_addr: 1008, dds_index: 20 }
+  #   - { slave_addr: 1009, dds_index: 21 }
+  #   - { slave_addr: 1010, dds_index: 22 }
+  #   - { slave_addr: 1011, dds_index: 23 }
+  #   - { slave_addr: 1012, dds_index: 24 }
+  #   - { slave_addr: 1013, dds_index: 25 }
+  #   - { slave_addr: 1014, dds_index: 26 }
+  #   - { slave_addr: 1015, dds_index: 27 }

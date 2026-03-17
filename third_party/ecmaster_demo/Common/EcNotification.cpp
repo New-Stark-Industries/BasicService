@@ -117,44 +117,22 @@ EC_T_DWORD CEmNotification::ecatNotify(
             } break;
         case EC_NOTIFY_DC_SLV_SYNC: /* GEN|5 */
             {
-                /* This notification is called if state of slave deviation surveillance changes */
+                /* 仅在上报“失步”时打印（错误）；正常 in-sync 不打印，避免周期刷屏 */
                 EC_T_DC_SYNC_NTFY_DESC* pNtfySlv = &pNotificationDesc->desc.SyncNtfyDesc;
-                if (pNtfySlv->IsInSync)
-                {
-                    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, GetText(EC_TXT_DCSLVSYNC_INSYNC), pNtfySlv->dwDeviation));
-                }
-                else
+                if (!pNtfySlv->IsInSync)
                 {
                     EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, GetText(EC_TXT_DCSLVSYNC_OUTOFSYNC), pNtfySlv->dwDeviation));
                     EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "DC Slave \"%s\", EtherCAT address = %d\n", pNtfySlv->SlaveProp.achName, pNtfySlv->SlaveProp.wStationAddress));
                 }
             } break;
         case EC_NOTIFY_DCM_SYNC:  /* GEN|9 */
-            {
-                /* This notification is called if state of DCM error monitoring changes */
-                EC_T_DCM_SYNC_NTFY_DESC* pDcmInSyncNotify = &pNotificationDesc->desc.DcmInSyncDesc;
-                if (pDcmInSyncNotify->IsInSync)
-                {
-                    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, GetText(EC_TXT_DCM_INSYNC), pDcmInSyncNotify->nCtlErrorNsecCur, pDcmInSyncNotify->nCtlErrorNsecAvg, pDcmInSyncNotify->nCtlErrorNsecMax));
-                }
-                else
-                {
-                    EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, GetText(EC_TXT_DCM_OUTOFSYNC), pDcmInSyncNotify->nCtlErrorNsecCur, pDcmInSyncNotify->nCtlErrorNsecAvg, pDcmInSyncNotify->nCtlErrorNsecMax));
-                }
-            } break;
+            /* 不再上报 DCM in/out of sync 日志，避免刷屏 */
+            break;
         case EC_NOTIFY_DCX_SYNC:  /* GEN|10 */
             {
-                /* This notification is called if state of DCX error monitoring changes */
+                /* 仅在上报“失步”时打印（错误）；正常 in-sync 不打印，避免周期刷屏 */
                 EC_T_DCX_SYNC_NTFY_DESC* pDcxInSyncNotify = &pNotificationDesc->desc.DcxInSyncDesc;
-                if (pDcxInSyncNotify->IsInSync)
-                {
-                    EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, GetText(EC_TXT_DCX_INSYNC), pDcxInSyncNotify->nCtlErrorNsecCur,
-                                                 pDcxInSyncNotify->nCtlErrorNsecAvg,
-                                                 pDcxInSyncNotify->nCtlErrorNsecMax,
-                                                 EC_HIWORD(pDcxInSyncNotify->nTimeStampDiff),
-                                                 EC_LOWORD(pDcxInSyncNotify->nTimeStampDiff)));
-                }
-                else
+                if (!pDcxInSyncNotify->IsInSync)
                 {
                     EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, GetText(EC_TXT_DCX_OUTOFSYNC), pDcxInSyncNotify->nCtlErrorNsecCur,
                                                   pDcxInSyncNotify->nCtlErrorNsecAvg,

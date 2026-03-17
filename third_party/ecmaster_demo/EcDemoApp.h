@@ -89,6 +89,16 @@ EC_T_VOID  ShowSyntaxLinkLayer(EC_T_VOID);
  */
 EC_T_DWORD EcDemoApp(T_EC_DEMO_APP_CONTEXT* pAppContext);
 
+/* 从外部注入电机完整配置（在调用 EcDemoApp 之前调用）
+ * slave_addrs[i] = ENI 中第 i 个电机的 PhysAddr（站地址）
+ * dds_indices[i] = 该电机对应全身第几号电机（DDS 数组索引，0-indexed）
+ * count          = 电机数量
+ * calib_file     = cfg.json 的绝对路径，NULL 则使用默认路径
+ */
+void EcDemo_SetMotorConfig(const EC_T_WORD* slave_addrs, const int* dds_indices, int count,
+                           const char* calib_file = EC_NULL);
+void EcDemo_SetMotorMap(const int* map, int count); /* 兼容旧接口，不推荐使用 */
+
 /* 性能统计输出宏（依赖 `EcLogging.h` 中的 CAtEmLogging 实现） */
 #define PRINT_PERF_MEAS() ((EC_NULL != pEcLogContext)?((CAtEmLogging*)pEcLogContext)->PrintPerfMeas(pAppContext->dwInstanceId, 0, pEcLogContext) : 0)
 #define PRINT_HISTOGRAM() ((EC_NULL != pEcLogContext)?((CAtEmLogging*)pEcLogContext)->PrintHistogramAsCsv(pAppContext->dwInstanceId, pAppContext->pvPerfMeas) : 0)

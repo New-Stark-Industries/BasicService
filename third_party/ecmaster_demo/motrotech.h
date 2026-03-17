@@ -568,6 +568,12 @@ EC_T_VOID  MT_ResetPositionSync(EC_T_WORD wAxis);
  *   - 对外显示为 轴1-7
  * ============================================================================ */
 
+/* [DDS] 设置电机映射表（在 EcDemoApp 启动前由外部调用）
+ * map[i] = j 表示：ENI里第i个电机（内部轴索引 i）对应全身第 j 号电机（DDS数组索引，0-indexed）
+ * 若未设置，则默认 map[i] = DDS_MOTOR_OFFSET + i（即固定偏移14）
+ */
+EC_T_VOID MT_SetMotorMap(const int* map, int count);
+
 /* [DDS] 设置/获取当前运行模式 */
 EC_T_VOID  MT_SetRunMode(RunMode mode);
 RunMode    MT_GetRunMode(EC_T_VOID);

@@ -13,6 +13,9 @@
 #include <cstdarg>
 #include <cstdio>
 
+/* 供 on_terminate 使用：Ctrl+C 时置 bRun=false 并 join，避免静态析构时 std::thread 仍 joinable 导致 terminate */
+static std::thread s_demo_thread;
+
 BasicService::BasicService()
   : tiny::application()
 {
@@ -48,27 +51,74 @@ static bool StartEcMasterDemo(const YAML::Node& busi_config)
         return true;
     }
 
-    const auto if_name = busi_config["ethercat_demo"]["if_name"].as<std::string>("");
-    const auto eni_path = busi_config["ethercat_demo"]["eni_path"].as<std::string>("");
-    const auto cycle_us = busi_config["ethercat_demo"]["cycle_us"].as<uint32_t>(1000);
+    const auto eni_path   = busi_config["ethercat_demo"]["eni_path"].as<std::string>("");
+    const auto cycle_us   = busi_config["ethercat_demo"]["cycle_us"].as<uint32_t>(1000);
     const auto duration_ms = busi_config["ethercat_demo"]["duration_ms"].as<uint32_t>(0);
+    // link_layer：完整的链路层参数串，例如：
+    //   sockraw 模式: "sockraw enP2p33s0"
+    //   dw3504 模式:  "dw3504 2 1 custom rk3588s osdriver 0"
+    const auto link_layer = busi_config["ethercat_demo"]["link_layer"].as<std::string>("");
+    const bool motor_map_from_cfg = busi_config["ethercat_demo"]["motor_map_from_cfg"].as<bool>(true);
+
+    std::string calib_path = eni_path.substr(0, eni_path.rfind('/') + 1) + "cfg.json";
+    std::vector<EC_T_WORD> slave_addrs;
+    std::vector<int> dds_indices;
+    if (motor_map_from_cfg) {
+        // 从 cfg.json 读 motor_map（只读一个文件，与 yaml 无关）
+        try {
+            YAML::Node cfg = YAML::LoadFile(calib_path);
+            YAML::Node ma = cfg["motor_map"];
+            if (ma && ma.IsSequence()) {
+                if (ma.size() >= 28 && !ma[0].IsMap()) {
+                    // 格式：28 个 bool 数组，true 表示该 DDS 索引为 EtherCAT 电机，站地址按顺序 1002, 1003, ...
+                    EC_T_WORD next_addr = 1002;
+                    for (size_t i = 0; i < ma.size() && i < 28; i++) {
+                        if (ma[i].as<bool>(false)) {
+                            dds_indices.push_back(static_cast<int>(i));
+                            slave_addrs.push_back(next_addr++);
+                        }
+                    }
+                } else {
+                    // 旧格式：[{ "slave_addr": 1002, "dds_index": 14 }, ...]
+                    for (const auto& node : ma) {
+                        if (node["slave_addr"] && node["dds_index"]) {
+                            slave_addrs.push_back(static_cast<EC_T_WORD>(node["slave_addr"].as<int>()));
+                            dds_indices.push_back(node["dds_index"].as<int>());
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception&) { }
+    }
+    if (slave_addrs.empty() && busi_config["ethercat_demo"]["motor_map"]) {
+        for (const auto& node : busi_config["ethercat_demo"]["motor_map"]) {
+            slave_addrs.push_back(static_cast<EC_T_WORD>(node["slave_addr"].as<int>()));
+            dds_indices.push_back(node["dds_index"].as<int>());
+        }
+    }
+    if (!slave_addrs.empty()) {
+        EcDemo_SetMotorConfig(slave_addrs.data(), dds_indices.data(),
+                              static_cast<int>(slave_addrs.size()),
+                              calib_path.c_str());
+        LOG_I(BasicService) << "motor_map: " << slave_addrs.size() << " motors"
+            << (motor_map_from_cfg ? " (from cfg.json)" : " (from busi.yaml)") << ", calib: " << calib_path;
+    }
 
     // [2026-01-16] 目的：关键参数缺失时直接报错，避免 demo 进入异常状态
-    if (if_name.empty() || eni_path.empty())
+    if (link_layer.empty() || eni_path.empty())
     {
-        LOG_COUT(BasicService) << "ethercat_demo.if_name or eni_path empty";
+        LOG_COUT(BasicService) << "ethercat_demo.link_layer or eni_path empty";
         return false;
     }
 
     // [2026-01-16] 目的：demo 在独立线程运行，避免阻塞 BasicService 初始化流程
-    static std::thread demo_thread;
-    if (demo_thread.joinable())
+    if (s_demo_thread.joinable())
     {
         LOG_I(BasicService) << "ecmaster demo already running";
         return true;
     }
 
-    demo_thread = std::thread([if_name, eni_path, cycle_us, duration_ms]() {
+    s_demo_thread = std::thread([link_layer, eni_path, cycle_us, duration_ms]() {
         // [2026-01-16] 目的：最小化复用 EcDemoMain.cpp 的上下文初始化流程
         T_EC_DEMO_APP_CONTEXT AppContext;
         OsMemset(&AppContext, 0, sizeof(AppContext));
@@ -98,13 +148,13 @@ static bool StartEcMasterDemo(const YAML::Node& busi_config)
         OsMemset(szCmd, 0, sizeof(szCmd));
         if (duration_ms > 0)
         {
-            OsSnprintf(szCmd, sizeof(szCmd) - 1, "-sockraw %s -f \"%s\" -b %u -t %u",
-                       if_name.c_str(), eni_path.c_str(), cycle_us, duration_ms);
+            OsSnprintf(szCmd, sizeof(szCmd) - 1, "-%s -f \"%s\" -b %u -t %u",
+                       link_layer.c_str(), eni_path.c_str(), cycle_us, duration_ms);
         }
         else
         {
-            OsSnprintf(szCmd, sizeof(szCmd) - 1, "-sockraw %s -f \"%s\" -b %u",
-                       if_name.c_str(), eni_path.c_str(), cycle_us);
+            OsSnprintf(szCmd, sizeof(szCmd) - 1, "-%s -f \"%s\" -b %u",
+                       link_layer.c_str(), eni_path.c_str(), cycle_us);
         }
 
         // [2026-01-16] 目的：将命令行参数写入 demo 参数结构体
@@ -194,6 +244,12 @@ bool BasicService::init_config(const std::string& busi_config)
 void BasicService::on_terminate()
 {
     LOG_COUT(BasicService) << "on_terminate";
+    /* 通知 EcDemoApp 主循环退出，并 join demo 线程，避免进程退出时 std::thread 析构调用 terminate */
+    bRun = EC_FALSE;
+    if (s_demo_thread.joinable())
+    {
+        s_demo_thread.join();
+    }
 }
 
 std::string BasicService::app_version() const
