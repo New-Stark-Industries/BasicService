@@ -130,6 +130,10 @@ static EC_T_BOOL           S_MotorCmdValid[MAX_AXIS_NUM];
 static MotorState_         S_MotorState[MAX_AXIS_NUM];
 /* 位置同步标记：首次使能时同步 fCurPos 到实际位置 */
 static EC_T_BOOL           S_FirstEnable[MAX_AXIS_NUM] = { EC_FALSE };
+/* 抱闸释放延时计数器：首次使能后保持目标=当前位置，等抱闸打开再插补 */
+static EC_T_DWORD S_BrakeHoldCycles[MAX_AXIS_NUM] = { 0 };
+/* 0x6060 未映射到 PDO 时，每轴仅一次通过 SDO 写入 CSP(8) 的标记 */
+static EC_T_BOOL S_ModeOfOpSdoSent[MAX_AXIS_NUM] = { EC_FALSE };
 /* 总线周期时间（秒），在 MT_Setup() 里由 dwBusCycleTimeUsec 计算出来 */
 static EC_T_LREAL fTimeSec = 0.0000;
 
@@ -162,6 +166,7 @@ EC_T_DWORD MT_Init(T_EC_DEMO_APP_CONTEXT *pAppContext) {
   OsMemset((EC_T_VOID*)S_MotorCmd, 0, MAX_AXIS_NUM * sizeof(MotorCmd_));
   OsMemset((EC_T_VOID*)S_MotorCmdValid, 0, MAX_AXIS_NUM * sizeof(EC_T_BOOL));
   OsMemset((EC_T_VOID*)S_MotorState, 0, MAX_AXIS_NUM * sizeof(MotorState_));
+  OsMemset((EC_T_VOID*)S_ModeOfOpSdoSent, 0, MAX_AXIS_NUM * sizeof(EC_T_BOOL));
 
   /* 2) 给每个轴设置初值（“默认模式/默认状态”）
    * 注意：这些不是从站真实状态；真实状态必须在 MT_Setup() 映射到 StatusWord 后，
@@ -518,9 +523,22 @@ EC_T_DWORD MT_Setup(T_EC_DEMO_APP_CONTEXT *pAppContext) {
                       "Motrotech: MyAxis[%d].pbyModeOfOperation = 0x%08X",
                       MyAxis_num_tmp,
                       My_Motor[MyAxis_num_tmp].pbyModeOfOperation));
-          } else if (pProcessVarInfoOut[i].wIndex ==
-                     DRV_OBJ_DIGITAL_OUTPUT +
-                         dwAxis * OBJOFFSET) // 0x7010 - Output 1
+          }
+          else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MANUAL_BRAKE + dwAxis * OBJOFFSET &&
+                   pProcessVarInfoOut[i].wSubIndex == 0)
+          {
+              /* 0x60FE.00 手动抱闸（Kinco 带抱闸电机 RPDO），0=吸合 1=强制打开 */
+              My_Motor[MyAxis_num_tmp].pbyManualBrake =
+                (EC_T_BYTE*)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+              EcLogMsg(EC_LOG_LEVEL_INFO,
+                       (pEcLogContext,
+                        EC_LOG_LEVEL_INFO,
+                        "Motrotech: MyAxis[%d].pbyManualBrake = 0x%08X",
+                        MyAxis_num_tmp,
+                        My_Motor[MyAxis_num_tmp].pbyManualBrake));
+          }
+          else if (pProcessVarInfoOut[i].wIndex ==
+                   DRV_OBJ_DIGITAL_OUTPUT + dwAxis * OBJOFFSET) // 0x7010 - Output 1
           {
             if (pProcessVarInfoOut[i].wSubIndex ==
                 DRV_OBJ_DIGITAL_OUTPUT_SUBINDEX_1) // 0x7010/1 - Output subindex
@@ -618,9 +636,22 @@ EC_T_DWORD MT_Setup(T_EC_DEMO_APP_CONTEXT *pAppContext) {
                      (pEcLogContext, EC_LOG_LEVEL_INFO,
                       "Motrotech: MyAxis[%d].pwStatusWord = 0x%08X",
                       MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pwStatusWord));
-          } else if (pProcessVarInfoIn[i].wIndex ==
-                     DRV_OBJ_POSITION_ACTUAL_VALUE +
-                         dwAxis * OBJOFFSET) // 0x6064 - ActualPosition
+          }
+          else if (pProcessVarInfoIn[i].wIndex == DRV_OBJ_BRAKE_STATUS + dwAxis * OBJOFFSET &&
+                   pProcessVarInfoIn[i].wSubIndex == 0)
+          {
+              /* 0x60FD.00 抱闸状态（Kinco 带抱闸电机 TPDO），0=吸合 1=打开 */
+              My_Motor[MyAxis_num_tmp].pbyBrakeStatus =
+                (EC_T_BYTE*)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+              EcLogMsg(EC_LOG_LEVEL_INFO,
+                       (pEcLogContext,
+                        EC_LOG_LEVEL_INFO,
+                        "Motrotech: MyAxis[%d].pbyBrakeStatus = 0x%08X",
+                        MyAxis_num_tmp,
+                        My_Motor[MyAxis_num_tmp].pbyBrakeStatus));
+          }
+          else if (pProcessVarInfoIn[i].wIndex ==
+                   DRV_OBJ_POSITION_ACTUAL_VALUE + dwAxis * OBJOFFSET) // 0x6064 - ActualPosition
           {
             /* 0x6064 ActualPosition（从站写 → 主站读）
              * - demo 在未使能时，把 TargetPosition 设为
@@ -906,6 +937,10 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     st.sensor[1] = 0;
     S_MotorState[i] = st;
 
+    /* 躯干抱闸：TCHL 正常运行与无抱闸电机一致，无需额外抱闸控制指令；抱闸由 6040h
+     * 触发、驱动器自动完成。 6041h bit9 可做抱闸状态门控（可选）；调试手动盘车：SDO
+     * 0x381E=128（仅去使能且速度 0 时有效，重新使能后自动复位）。 */
+
     /* Mode of Operation（0x6060）
      * - demo 默认在 MT_Init 中设为 CSP（8）
      * - 如果 0x6060 被映射到 PDO，就在这里每周期刷新一次（很多驱动允许）
@@ -931,7 +966,8 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     }
     /* [2026-01-19] 优化：手动模式下增加平滑移动逻辑，防止突跳并实现到达即停 */
     if (pDemoAxis->wActState != DRV_DEV_STATE_OP_ENABLED) {
-        S_FirstEnable[i] = EC_FALSE; // 未使能时，重置同步标记
+        S_FirstEnable[i] = EC_FALSE;
+        S_BrakeHoldCycles[i] = 0;
     }
 
     /* [2026-01-23] 重构：基于 motion_func 和 drive_mode 的控制逻辑 */
@@ -944,139 +980,294 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     }
     /* ===== MOTION_AGING: 老化测试 ===== */
     else if (bHaveCmd && (cmd.motion_func == MOTION_AGING) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
-      if (!S_FirstEnable[i]) {
-          pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
-          S_FirstEnable[i] = EC_TRUE;
-      }
-
-      // 获取限位范围
-      EC_T_LREAL fMinLimit, fMaxLimit;
-      if (pDemoAxis->bLimitValid) {
-          fMinLimit = pDemoAxis->fLimitMin;
-          fMaxLimit = pDemoAxis->fLimitMax;
-      } else {
-          EC_T_LREAL fRange = (cmd.range > 0) ? (EC_T_LREAL)cmd.range : 5.0;
-          fMinLimit = -fRange;
-          fMaxLimit = fRange;
-      }
-
-      EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0; 
-      EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
-
-      // 自动切换方向
-      if (pDemoAxis->fCurPos >= fMaxLimit) {
-          nDirection[i] = -1;
-      } else if (pDemoAxis->fCurPos <= fMinLimit) {
-          nDirection[i] = 1;
-      }
-
-      pDemoAxis->fCurPos += (nDirection[i] * fMaxStep);
-
-      // 根据 drive_mode 写入 PDO
-      if (cmd.drive_mode == DRIVE_MODE_PT) {
-        // PT 模式老化：用阻抗控制
-        MotorState_ *pState = &S_MotorState[i];
-        EC_T_LREAL tau_cmd = cmd.kp * (pDemoAxis->fCurPos - pState->q_fb) + cmd.kd * (0 - pState->dq_fb);
-        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
-        EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
-        if (tau_permille > 3000.0) tau_permille = 3000.0;
-        if (tau_permille < -3000.0) tau_permille = -3000.0;
-        if (pDemoAxis->pwTargetTorque != EC_NULL) {
-            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+        /* 躯干抱闸门控：仅当存在 PDO 抱闸反馈(0x60FD)时阻塞运动；TCHL 无
+         * 0x60FD，按无抱闸电机处理。 */
+        EC_T_BOOL bBrakeClosed = EC_FALSE;
+        if ((EC_T_INT)i < TRUNK_AXIS_COUNT && pDemoAxis->pbyBrakeStatus != EC_NULL)
+            bBrakeClosed = (*pDemoAxis->pbyBrakeStatus & 1) == 0;
+        if (bBrakeClosed)
+        {
+            if (pDemoAxis->pnActPosition != EC_NULL && pDemoAxis->pnTargetPosition != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
+            if (pDemoAxis->pnTargetVelocity != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnTargetVelocity, 0);
+            if (pDemoAxis->pnVelocityOffset != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+            if (pDemoAxis->pwTorqueOffset != EC_NULL)
+                EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
         }
-        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
-        }
-      } else {
-        // CSP/CST 模式老化：用位置控制
-        if (pDemoAxis->pnTargetPosition != EC_NULL) {
-          const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
-          EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
-        }
-        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
-        }
-      }
+        else
+        {
+            if (!S_FirstEnable[i])
+            {
+                pDemoAxis->fCurPos = S_MotorState[i].q_fb;
+                S_FirstEnable[i] = EC_TRUE;
+                if ((EC_T_INT)i < TRUNK_AXIS_COUNT && fTimeSec > 0)
+                {
+                    EC_T_DWORD delayMs = ((EC_T_INT)i < 2) ? 500 : 300;
+                    S_BrakeHoldCycles[i] = (EC_T_DWORD)(delayMs / (fTimeSec * 1000.0) + 0.5);
+                }
+            }
+
+            /* 抱闸延时期间：锁住不动 */
+            if (S_BrakeHoldCycles[i] > 0)
+            {
+                S_BrakeHoldCycles[i]--;
+                pDemoAxis->fCurPos = S_MotorState[i].q_fb;
+                if (pDemoAxis->pnActPosition != EC_NULL && pDemoAxis->pnTargetPosition != EC_NULL)
+                    EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
+                if (pDemoAxis->pnVelocityOffset != EC_NULL)
+                    EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+                if (pDemoAxis->pwTorqueOffset != EC_NULL)
+                    EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
+            }
+            else
+            {
+
+                // 获取限位范围
+                EC_T_LREAL fMinLimit, fMaxLimit;
+                if (pDemoAxis->bLimitValid)
+                {
+                    fMinLimit = pDemoAxis->fLimitMin;
+                    fMaxLimit = pDemoAxis->fLimitMax;
+                }
+                else
+                {
+                    EC_T_LREAL fRange = (cmd.range > 0) ? (EC_T_LREAL)cmd.range : 5.0;
+                    fMinLimit = -fRange;
+                    fMaxLimit = fRange;
+                }
+
+                EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0;
+                EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
+
+                // 自动切换方向
+                if (pDemoAxis->fCurPos >= fMaxLimit)
+                {
+                    nDirection[i] = -1;
+                }
+                else if (pDemoAxis->fCurPos <= fMinLimit)
+                {
+                    nDirection[i] = 1;
+                }
+
+                pDemoAxis->fCurPos += (nDirection[i] * fMaxStep);
+
+                // 根据 drive_mode 写入 PDO
+                if (cmd.drive_mode == DRIVE_MODE_PT)
+                {
+                    // PT 模式老化：用阻抗控制
+                    MotorState_* pState = &S_MotorState[i];
+                    EC_T_LREAL tau_cmd =
+                      cmd.kp * (pDemoAxis->fCurPos - pState->q_fb) + cmd.kd * (0 - pState->dq_fb);
+                    EC_T_LREAL fRatedTorque =
+                      pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+                    EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
+                    if (tau_permille > 3000.0)
+                        tau_permille = 3000.0;
+                    if (tau_permille < -3000.0)
+                        tau_permille = -3000.0;
+                    if (pDemoAxis->pwTargetTorque != EC_NULL)
+                    {
+                        EC_SETWORD(pDemoAxis->pwTargetTorque,
+                                   (EC_T_WORD)((EC_T_SWORD)tau_permille));
+                    }
+                    if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                    {
+                        *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
+                    }
+                }
+                else
+                {
+                    // CSP/CST 模式老化：用位置控制
+                    if (pDemoAxis->pnTargetPosition != EC_NULL)
+                    {
+                        const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
+                        EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+                    }
+                    if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                    {
+                        *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
+                    }
+                }
+            }
+        } // aging brake-hold else
     }
     /* ===== MOTION_CONTROL: 正常控制（PT/CSP/CST）===== */
     else if (bHaveCmd && (cmd.motion_func == MOTION_CONTROL) && (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED)) {
-      // 同步初始位置
-      if (!S_FirstEnable[i]) {
-          pDemoAxis->fCurPos = S_MotorState[i].q_fb; 
-          S_FirstEnable[i] = EC_TRUE;
-          EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO, "Axis %d: Position Sync to %d (x1000)\n", i, (EC_T_INT)(pDemoAxis->fCurPos*1000)));
-      }
+        /* 躯干抱闸门控：仅当存在 PDO 抱闸反馈(0x60FD)时阻塞运动；TCHL 无
+         * 0x60FD，按无抱闸电机处理。 */
+        EC_T_BOOL bBrakeClosed = EC_FALSE;
+        if ((EC_T_INT)i < TRUNK_AXIS_COUNT && pDemoAxis->pbyBrakeStatus != EC_NULL)
+            bBrakeClosed = (*pDemoAxis->pbyBrakeStatus & 1) == 0;
+        if (bBrakeClosed)
+        {
+            if (pDemoAxis->pnActPosition != EC_NULL && pDemoAxis->pnTargetPosition != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
+            if (pDemoAxis->pnTargetVelocity != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnTargetVelocity, 0);
+            if (pDemoAxis->pnVelocityOffset != EC_NULL)
+                EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+            if (pDemoAxis->pwTorqueOffset != EC_NULL)
+                EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
+            if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                *pDemoAxis->pbyModeOfOperation = pDemoAxis->eModesOfOperation;
+        }
+        else
+        {
+            // 同步初始位置
+            if (!S_FirstEnable[i])
+            {
+                pDemoAxis->fCurPos = S_MotorState[i].q_fb;
+                S_FirstEnable[i] = EC_TRUE;
+                /* 躯干轴有抱闸，使能后需等抱闸打开再插补，否则跟随误差 → Fault。
+                 * waist1/waist2: Pr1.54=400ms, waist3/body: 200ms，加余量。 */
+                if ((EC_T_INT)i < TRUNK_AXIS_COUNT && fTimeSec > 0)
+                {
+                    EC_T_DWORD delayMs = ((EC_T_INT)i < 2) ? 500 : 300;
+                    S_BrakeHoldCycles[i] = (EC_T_DWORD)(delayMs / (fTimeSec * 1000.0) + 0.5);
+                }
+                else
+                {
+                    S_BrakeHoldCycles[i] = 0;
+                }
+                EcLogMsg(EC_LOG_LEVEL_INFO,
+                         (pEcLogContext,
+                          EC_LOG_LEVEL_INFO,
+                          "Axis %d: Position Sync to %d (x1000), brake hold %d cycles\n",
+                          i,
+                          (EC_T_INT)(pDemoAxis->fCurPos * 1000),
+                          S_BrakeHoldCycles[i]));
+            }
 
-      /* --- 根据 drive_mode 执行不同控制 --- */
-      if (cmd.drive_mode == DRIVE_MODE_PT) {
-        // PT 模式：阻抗控制 τ = τ_ff + kp*(q_des-q_fb) + kd*(dq_des-dq_fb)
-        MotorState_ *pState = &S_MotorState[i];
-        EC_T_LREAL q_fb = pState->q_fb;
-        EC_T_LREAL dq_fb = pState->dq_fb;
-        EC_T_LREAL tau_cmd = cmd.tau + cmd.kp * (cmd.q - q_fb) + cmd.kd * (cmd.dq - dq_fb);
-        
-        
-        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
-        EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
-        if (tau_permille > 3000.0) tau_permille = 3000.0;
-        if (tau_permille < -3000.0) tau_permille = -3000.0;
-        
-        if (pDemoAxis->pwTargetTorque != EC_NULL) {
-            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
-        }
-        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
-        }
-      }
-      else if (cmd.drive_mode == DRIVE_MODE_CSP) {
-        // CSP 模式：平滑位置控制
-        EC_T_LREAL fTargetQ = (EC_T_LREAL)cmd.q;
-        EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0; 
-        EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
+            /* 抱闸延时期间：锁住目标=实际位置，不插补 */
+            if (S_BrakeHoldCycles[i] > 0)
+            {
+                S_BrakeHoldCycles[i]--;
+                pDemoAxis->fCurPos = S_MotorState[i].q_fb;
+                if (pDemoAxis->pnTargetPosition != EC_NULL)
+                {
+                    if (pDemoAxis->pnActPosition != EC_NULL)
+                        EC_SETDWORD(pDemoAxis->pnTargetPosition, *pDemoAxis->pnActPosition);
+                }
+                if (pDemoAxis->pnVelocityOffset != EC_NULL)
+                    EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+                if (pDemoAxis->pwTorqueOffset != EC_NULL)
+                    EC_SETWORD(pDemoAxis->pwTorqueOffset, 0);
+                if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                    *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
+            }
+            else if (cmd.drive_mode == DRIVE_MODE_PT)
+            {
+                // PT 模式：阻抗控制 τ = τ_ff + kp*(q_des-q_fb) + kd*(dq_des-dq_fb)
+                MotorState_* pState = &S_MotorState[i];
+                EC_T_LREAL q_fb = pState->q_fb;
+                EC_T_LREAL dq_fb = pState->dq_fb;
+                EC_T_LREAL tau_cmd = cmd.tau + cmd.kp * (cmd.q - q_fb) + cmd.kd * (cmd.dq - dq_fb);
 
-        EC_T_LREAL fDiff = fTargetQ - pDemoAxis->fCurPos;
-        if (fDiff > fMaxStep) {
-            pDemoAxis->fCurPos += fMaxStep;
-        } else if (fDiff < -fMaxStep) {
-            pDemoAxis->fCurPos -= fMaxStep;
-        } else {
-            pDemoAxis->fCurPos = fTargetQ;
-        }
+                EC_T_LREAL fRatedTorque =
+                  pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+                EC_T_LREAL tau_permille = tau_cmd / fRatedTorque * 1000.0;
+                if (tau_permille > 3000.0)
+                    tau_permille = 3000.0;
+                if (tau_permille < -3000.0)
+                    tau_permille = -3000.0;
 
-        if (pDemoAxis->pnTargetPosition != EC_NULL) {
-          const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
-          EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+                if (pDemoAxis->pwTargetTorque != EC_NULL)
+                {
+                    EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+                }
+                if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                {
+                    *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_PT;
+                }
+            }
+            else if (cmd.drive_mode == DRIVE_MODE_CSP)
+            {
+                // CSP 模式：平滑位置控制
+                /* 若 0x6060 未映射到 PDO，用 SDO 每轴仅一次写入
+                 * 0x6060=8(CSP)，否则驱动器不执行目标位置 */
+                if (pDemoAxis->pbyModeOfOperation == EC_NULL && !S_ModeOfOpSdoSent[i] &&
+                    pDemoAxis->wStationAddress != 0)
+                {
+                    EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+                    if (dwSlaveId != INVALID_SLAVE_ID)
+                    {
+                        EC_T_BYTE byMode = (EC_T_BYTE)DRIVE_MODE_CSP;
+                        EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                                              DRV_OBJ_MODES_OF_OPERATION,
+                                                              0,
+                                                              (EC_T_BYTE*)&byMode,
+                                                              sizeof(byMode),
+                                                              5000,
+                                                              0);
+                        if (dwRes == EC_E_NOERROR)
+                            S_ModeOfOpSdoSent[i] = EC_TRUE;
+                    }
+                }
+                EC_T_LREAL fTargetQ = (EC_T_LREAL)cmd.q;
+                EC_T_LREAL fMaxVel = (cmd.dq > 0) ? (EC_T_LREAL)cmd.dq : 1.0;
+                EC_T_LREAL fMaxStep = fMaxVel * fTimeSec;
+
+                EC_T_LREAL fDiff = fTargetQ - pDemoAxis->fCurPos;
+                if (fDiff > fMaxStep)
+                {
+                    pDemoAxis->fCurPos += fMaxStep;
+                }
+                else if (fDiff < -fMaxStep)
+                {
+                    pDemoAxis->fCurPos -= fMaxStep;
+                }
+                else
+                {
+                    pDemoAxis->fCurPos = fTargetQ;
+                }
+
+                if (pDemoAxis->pnTargetPosition != EC_NULL)
+                {
+                    const EC_T_LREAL q_cnt = pDemoAxis->fCurPos * pDemoAxis->fCntPerRad;
+                    EC_SETDWORD(pDemoAxis->pnTargetPosition, MtSatToInt32(q_cnt));
+                }
+                /* [修复] VelocityOffset(0x60B1) 是 CSP 的速度前馈，不应写 cmd.dq（那是插补限速）。
+                 *  之前 cmd.dq=0.3 * fCntPerRad ≈ 50 万 counts/s 被写入前馈，
+                 *  电机到位后 TargetPosition 不变但前馈仍在，导致重力关节乱动。
+                 *  修复：CSP 模式下 VelocityOffset 置 0，由驱动器位置环自行处理。
+                 */
+                if (pDemoAxis->pnVelocityOffset != EC_NULL)
+                {
+                    EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
+                }
+                if (pDemoAxis->pwTorqueOffset != EC_NULL)
+                {
+                    const EC_T_SWORD tau_raw = (EC_T_SWORD)(cmd.tau * 1000.0f);
+                    EC_SETWORD(pDemoAxis->pwTorqueOffset, tau_raw);
+                }
+                if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                {
+                    *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
+                }
+            }
+            else if (cmd.drive_mode == DRIVE_MODE_CST)
+            {
+                // CST 模式：纯力矩控制
+                EC_T_LREAL fRatedTorque =
+                  pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
+                EC_T_LREAL tau_permille = cmd.tau / fRatedTorque * 1000.0;
+                if (tau_permille > 3000.0)
+                    tau_permille = 3000.0;
+                if (tau_permille < -3000.0)
+                    tau_permille = -3000.0;
+
+                if (pDemoAxis->pwTargetTorque != EC_NULL)
+                {
+                    EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
+                }
+                if (pDemoAxis->pbyModeOfOperation != EC_NULL)
+                {
+                    *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CST;
+                }
+            }
         }
-        /* [修复] VelocityOffset(0x60B1) 是 CSP 的速度前馈，不应写 cmd.dq（那是插补限速）。
-         *  之前 cmd.dq=0.3 * fCntPerRad ≈ 50 万 counts/s 被写入前馈，
-         *  电机到位后 TargetPosition 不变但前馈仍在，导致重力关节乱动。
-         *  修复：CSP 模式下 VelocityOffset 置 0，由驱动器位置环自行处理。
-         */
-        if (pDemoAxis->pnVelocityOffset != EC_NULL) {
-          EC_SETDWORD(pDemoAxis->pnVelocityOffset, 0);
-        }
-        if (pDemoAxis->pwTorqueOffset != EC_NULL) {
-          const EC_T_SWORD tau_raw = (EC_T_SWORD)(cmd.tau * 1000.0f);
-          EC_SETWORD(pDemoAxis->pwTorqueOffset, tau_raw);
-        }
-        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
-        }
-      }
-      else if (cmd.drive_mode == DRIVE_MODE_CST) {
-        // CST 模式：纯力矩控制
-        EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
-        EC_T_LREAL tau_permille = cmd.tau / fRatedTorque * 1000.0;
-        if (tau_permille > 3000.0) tau_permille = 3000.0;
-        if (tau_permille < -3000.0) tau_permille = -3000.0;
-        
-        if (pDemoAxis->pwTargetTorque != EC_NULL) {
-            EC_SETWORD(pDemoAxis->pwTargetTorque, (EC_T_WORD)((EC_T_SWORD)tau_permille));
-        }
-        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
-            *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CST;
-        }
-      }
     }
     /* ===== 已使能但无有效命令或 IDLE：保持当前位置 ===== */
     else if (pDemoAxis->wActState == DRV_DEV_STATE_OP_ENABLED) {
@@ -1434,8 +1625,19 @@ static EC_T_DWORD Process_Commands(T_EC_DEMO_APP_CONTEXT *pAppContext) {
         wControl = DRV_CTRL_CMD_SHUTDOWN;
         break;
       case DRV_DEV_STATE_READY_TO_SWITCHON:
-        /* SwitchOn: 0x0007（最短路径第二步） */
-        wControl = DRV_CTRL_CMD_SWITCHON;
+          /* 躯干抱闸：仅当存在 PDO 抱闸反馈(0x60FD)时才门控；TCHL 无 0x60FD，抱闸由 6040
+           * 使能后自动打开，此处始终发 SWITCHON 避免死锁。 */
+          {
+              EC_T_BOOL bTrunkBrakeClosed = EC_FALSE;
+              if ((EC_T_INT)mIndex < TRUNK_AXIS_COUNT &&
+                  pDemoAxis->wReqState == DRV_DEV_STATE_READY_TO_SWITCHON &&
+                  pDemoAxis->pbyBrakeStatus != EC_NULL)
+                  bTrunkBrakeClosed = (*pDemoAxis->pbyBrakeStatus & 1) == 0;
+              if (bTrunkBrakeClosed)
+                  wControl = DRV_CTRL_CMD_DIS_VOLTAGE;
+              else
+                  wControl = DRV_CTRL_CMD_SWITCHON;
+          }
         break;
       case DRV_DEV_STATE_SWITCHED_ON:
         /* EnableOperation: 0x000F（最短路径第三步） */
@@ -1604,6 +1806,234 @@ EC_T_BOOL MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_L
 }
 
 /* ============================================================================
+ * [抱闸电机 TCHL] MT_ConfigureTrunkBrakeSDO
+ * 正常运行与无抱闸电机一致：使能(6040h=0x0007)→发运动指令→停止→去使能(6040h=0x0000)，
+ * 抱闸打开/闭合由驱动器自动完成，无需在运行中下发任何抱闸 PDO 或 SDO。
+ * 本函数仅在初始化时调用 1 次，配置抱闸时序参数（默认值可用，建议按负载/机械调整）。
+ *
+ * 参数含义与推荐范围（手册）：
+ * - Pr1.54(0x3136)：伺服使能→抱闸打开延时。躯干内部 2、3(body/waist3) 默认 200ms；内部
+ * 0、1(waist1/waist2)负载大 设为 400ms，避免抱闸打开过早导致“抬不起来”；仍不足时可酌情再增大。
+ * - Pr1.55(0x3137)：抱闸闭合→伺服去使能延时。默认 200ms，推荐 50~200ms。
+ * - Pr1.56(0x3138)：允许抱闸闭合的速度阈值（低于此值才闭合）。默认 6000rpm，推荐
+ * 50~300rpm（惯性大可适当增大）。
+ * - Pr1.57(0x3139)：伺服去使能→抱闸闭合延时。默认 500ms，推荐 100~500ms。
+ * - 0x605A = 2：Quick Stop Option Code（减速停车）。
+ * 特殊场景：调试手动盘车用 SDO 写 Pr8.30(0x381E)=128，完成后写 0；抱闸动作异常时仅需 SDO 调整
+ * Pr1.54~1.57。
+ * ============================================================================ */
+EC_T_BOOL MT_ConfigureTrunkBrakeSDO(EC_T_VOID)
+{
+    const EC_T_INT nTrunkEnd = (MotorCount < TRUNK_AXIS_COUNT) ? MotorCount : TRUNK_AXIS_COUNT;
+    for (EC_T_INT wAxis = 0; wAxis < nTrunkEnd; wAxis++)
+    {
+        My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
+        if (pDemoAxis->wStationAddress == 0)
+            continue;
+        EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+        if (dwSlaveId == INVALID_SLAVE_ID)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "MT_ConfigureTrunkBrakeSDO: Axis %d slave %d not found\n",
+                      wAxis,
+                      pDemoAxis->wStationAddress));
+            continue;
+        }
+        EC_T_DWORD dwRes;
+        EC_T_WORD wVal;
+
+        /* Pr1.54
+         * 伺服使能→抱闸打开延时(ms)。躯干内部
+         * 0、1(waist1/waist2)负载大，适当加长延时避免“抬不起来”
+         */
+        wVal = (wAxis <= 1) ? 400 : 200;
+        dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                   DRV_OBJ_PR1_54_SERVO_ON_DELAY_MS,
+                                   0,
+                                   (EC_T_BYTE*)&wVal,
+                                   sizeof(wVal),
+                                   SDO_TIMEOUT,
+                                   0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr1.54(0x3136)=%d failed: 0x%08X\n",
+                      wAxis,
+                      (int)wVal,
+                      dwRes));
+        }
+        wVal = 200; /* Pr1.55 默认 200ms，推荐 50~200ms */
+        dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                   DRV_OBJ_PR1_55_BRAKE_CLOSE_OFF_MS,
+                                   0,
+                                   (EC_T_BYTE*)&wVal,
+                                   sizeof(wVal),
+                                   SDO_TIMEOUT,
+                                   0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr1.55(0x3137)=200 failed: 0x%08X\n",
+                      wAxis,
+                      dwRes));
+        }
+        wVal = 100; /* Pr1.56 推荐 50~300rpm（惯性大可取 300），手册默认 6000rpm */
+        dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                   DRV_OBJ_PR1_56_BRAKE_SPEED_RPM,
+                                   0,
+                                   (EC_T_BYTE*)&wVal,
+                                   sizeof(wVal),
+                                   SDO_TIMEOUT,
+                                   0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr1.56(0x3138)=100 failed: 0x%08X\n",
+                      wAxis,
+                      dwRes));
+        }
+        wVal = 300; /* Pr1.57 推荐 100~500ms，手册默认 500ms */
+        dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                   DRV_OBJ_PR1_57_SERVO_OFF_BRAKE_MS,
+                                   0,
+                                   (EC_T_BYTE*)&wVal,
+                                   sizeof(wVal),
+                                   SDO_TIMEOUT,
+                                   0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr1.57(0x3139)=300 failed: 0x%08X\n",
+                      wAxis,
+                      dwRes));
+        }
+        wVal = 2;
+        dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                   DRV_OBJ_QUICK_STOP_OPTION,
+                                   0,
+                                   (EC_T_BYTE*)&wVal,
+                                   sizeof(wVal),
+                                   SDO_TIMEOUT,
+                                   0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] 0x605A=2 failed: 0x%08X\n",
+                      wAxis,
+                      dwRes));
+        }
+        else
+        {
+            EcLogMsg(EC_LOG_LEVEL_INFO,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_INFO,
+                      "Axis[%d] Trunk brake SDO (3136=%d,3137=200,3138=100,3139=300,605A=2)\n",
+                      wAxis,
+                      (int)((wAxis <= 1) ? 400 : 200)));
+        }
+    }
+    return EC_TRUE;
+}
+
+/* ============================================================================
+ * [躯干抱闸 TCHL] 调试用：SDO 写 Pr8.30(0x381E) 强制打开/关闭抱闸
+ * 手册：Pr8.30=128 强制打开抱闸（仅伺服去使能且速度 0 时生效）；=0 恢复。
+ * 重新使能伺服后驱动器会自动将 Pr8.30 复位为 0。
+ * ============================================================================ */
+EC_T_BOOL MT_TrunkBrakeOpenSDO(EC_T_VOID)
+{
+    const EC_T_INT nTrunkEnd = (MotorCount < TRUNK_AXIS_COUNT) ? MotorCount : TRUNK_AXIS_COUNT;
+    EC_T_WORD wVal = 128; /* Pr8.30=128 强制打开抱闸 */
+    for (EC_T_INT wAxis = 0; wAxis < nTrunkEnd; wAxis++)
+    {
+        My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
+        if (pDemoAxis->wStationAddress == 0)
+            continue;
+        EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+        if (dwSlaveId == INVALID_SLAVE_ID)
+            continue;
+        EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                              DRV_OBJ_PR8_30_FORCE_BRAKE_OPEN,
+                                              0,
+                                              (EC_T_BYTE*)&wVal,
+                                              sizeof(wVal),
+                                              SDO_TIMEOUT,
+                                              0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr8.30(0x381E)=128 (brake open) failed: 0x%08X (servo disabled & "
+                      "speed 0?)\n",
+                      (EC_T_INT)wAxis,
+                      dwRes));
+        }
+        else
+        {
+            EcLogMsg(EC_LOG_LEVEL_INFO,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_INFO,
+                      "Axis[%d] Trunk brake forced open (Pr8.30=128)\n",
+                      (EC_T_INT)wAxis));
+        }
+    }
+    return EC_TRUE;
+}
+
+EC_T_BOOL MT_TrunkBrakeCloseSDO(EC_T_VOID)
+{
+    const EC_T_INT nTrunkEnd = (MotorCount < TRUNK_AXIS_COUNT) ? MotorCount : TRUNK_AXIS_COUNT;
+    EC_T_WORD wVal = 0; /* Pr8.30=0 恢复抱闸自动控制 */
+    for (EC_T_INT wAxis = 0; wAxis < nTrunkEnd; wAxis++)
+    {
+        My_Motor_Type* pDemoAxis = &My_Motor[wAxis];
+        if (pDemoAxis->wStationAddress == 0)
+            continue;
+        EC_T_DWORD dwSlaveId = ecatGetSlaveId(pDemoAxis->wStationAddress);
+        if (dwSlaveId == INVALID_SLAVE_ID)
+            continue;
+        EC_T_DWORD dwRes = ecatCoeSdoDownload(dwSlaveId,
+                                              DRV_OBJ_PR8_30_FORCE_BRAKE_OPEN,
+                                              0,
+                                              (EC_T_BYTE*)&wVal,
+                                              sizeof(wVal),
+                                              SDO_TIMEOUT,
+                                              0);
+        if (dwRes != EC_E_NOERROR)
+        {
+            EcLogMsg(EC_LOG_LEVEL_WARNING,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_WARNING,
+                      "Axis[%d] Pr8.30(0x381E)=0 (brake close) failed: 0x%08X\n",
+                      (EC_T_INT)wAxis,
+                      dwRes));
+        }
+        else
+        {
+            EcLogMsg(EC_LOG_LEVEL_INFO,
+                     (pEcLogContext,
+                      EC_LOG_LEVEL_INFO,
+                      "Axis[%d] Trunk brake restored auto (Pr8.30=0)\n",
+                      (EC_T_INT)wAxis));
+        }
+    }
+    return EC_TRUE;
+}
+
+/* ============================================================================
  * [2026-02-10] MT_SetHomingMethod35 - 通过 SDO 写 0x3801=5 将当前位置设为零点
  * 
  * 功能：向驱动器写入 0x3801=5，将当前编码器位置设为零点，
@@ -1675,6 +2105,7 @@ EC_T_BOOL MT_SetHomingMethod35(EC_T_WORD wAxis)
      *    下次从 IDLE 切回 MOTION_CONTROL 时，fCurPos 会重新同步到
      *    q_fb（此时已是 0），保证无跳变 */
     S_FirstEnable[wAxis] = EC_FALSE;
+    S_BrakeHoldCycles[wAxis] = 0;
 
     EC_T_SDWORD sdwPosAfter = 0;
     if (pDemoAxis->pnActPosition) {
@@ -1697,6 +2128,7 @@ EC_T_VOID MT_ResetPositionSync(EC_T_WORD wAxis)
 {
     if (wAxis < MAX_AXIS_NUM) {
         S_FirstEnable[wAxis] = EC_FALSE;
+        S_BrakeHoldCycles[wAxis] = 0;
     }
 }
 
@@ -1854,22 +2286,34 @@ EC_T_BOOL MT_ProcessDDSCommand(const DDS_LowCmd* pDDSCmd)
     
     /* 2. 获取当前全局驱动模式（调试模式下可设置，默认CSP）*/
     DriveMode driveMode = MT_GetGlobalDriveMode();
-    
-    /* 3. 遍历我们使用的电机，进行索引映射和命令转换
-     * DDS 索引: DDS_MOTOR_OFFSET + i = 14 + i
-     * 内部索引: i = 0 ~ 6
-     */
-    for (int i = 0; i < DDS_MOTOR_USED; i++) {
-        int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 数组索引: 14, 15, ..., 20 */
-        
-        /* 转换 DDS 命令到内部格式 */
+
+    /* 3. 躯干电机：DDS[8..11] -> 内部 0..3 */
+    for (int i = 0; i < DDS_TRUNK_COUNT; i++)
+    {
+        int ddsIndex = DDS_TRUNK_OFFSET + i;
         MotorCmd_ motorCmd;
         MT_ConvertDDSCmdToMotorCmd(&pDDSCmd->motor_cmd[ddsIndex], &motorCmd, driveMode);
-        
-        /* 写入内部命令缓冲区（内部索引: 0, 1, ..., 6）*/
         MT_SetMotorCmd((EC_T_WORD)i, &motorCmd);
     }
-    
+
+    /* 4. 头部电机：DDS[12..13] -> 内部 4..5 */
+    for (int i = 0; i < DDS_HEAD_COUNT; i++)
+    {
+        int ddsIndex = DDS_HEAD_OFFSET + i;
+        MotorCmd_ motorCmd;
+        MT_ConvertDDSCmdToMotorCmd(&pDDSCmd->motor_cmd[ddsIndex], &motorCmd, driveMode);
+        MT_SetMotorCmd((EC_T_WORD)(DDS_TRUNK_COUNT + i), &motorCmd);
+    }
+
+    /* 5. 臂电机：DDS[15..28] -> 内部 6..19 */
+    for (int i = 0; i < DDS_ARM_COUNT; i++)
+    {
+        int ddsIndex = DDS_MOTOR_OFFSET + i;
+        MotorCmd_ motorCmd;
+        MT_ConvertDDSCmdToMotorCmd(&pDDSCmd->motor_cmd[ddsIndex], &motorCmd, driveMode);
+        MT_SetMotorCmd((EC_T_WORD)(DDS_TRUNK_COUNT + DDS_HEAD_COUNT + i), &motorCmd);
+    }
+
     return EC_TRUE;
 }
 
@@ -1900,22 +2344,31 @@ EC_T_VOID MT_GetDDSState(DDS_LowState* pDDSState)
     /* TODO: 填充 tick（时间戳）*/
     static uint32_t s_tick = 0;
     pDDSState->tick = s_tick++;
-    
-    /* 遍历我们使用的电机，进行状态转换
-     * 内部索引: i = 0 ~ 6
-     * DDS 索引: DDS_MOTOR_OFFSET + i = 14 + i
-     */
-    for (int i = 0; i < DDS_MOTOR_USED; i++) {
-        int ddsIndex = DDS_MOTOR_OFFSET + i;  /* DDS 数组索引: 14, 15, ..., 20 */
-        
-        /* 获取内部电机状态 */
+
+    /* 躯干电机：内部 0..3 -> DDS[8..11] */
+    for (int i = 0; i < DDS_TRUNK_COUNT; i++)
+    {
         MotorState_ motorState;
         MT_GetMotorState((EC_T_WORD)i, &motorState);
-        
-        /* 转换到 DDS 格式 */
-        MT_ConvertMotorStateToDDS(&motorState, &pDDSState->motor_state[ddsIndex]);
+        MT_ConvertMotorStateToDDS(&motorState, &pDDSState->motor_state[DDS_TRUNK_OFFSET + i]);
     }
-    
+
+    /* 头部电机：内部 4..5 -> DDS[12..13] */
+    for (int i = 0; i < DDS_HEAD_COUNT; i++)
+    {
+        MotorState_ motorState;
+        MT_GetMotorState((EC_T_WORD)(DDS_TRUNK_COUNT + i), &motorState);
+        MT_ConvertMotorStateToDDS(&motorState, &pDDSState->motor_state[DDS_HEAD_OFFSET + i]);
+    }
+
+    /* 臂电机：内部 6..19 -> DDS[15..28] */
+    for (int i = 0; i < DDS_ARM_COUNT; i++)
+    {
+        MotorState_ motorState;
+        MT_GetMotorState((EC_T_WORD)(DDS_TRUNK_COUNT + DDS_HEAD_COUNT + i), &motorState);
+        MT_ConvertMotorStateToDDS(&motorState, &pDDSState->motor_state[DDS_MOTOR_OFFSET + i]);
+    }
+
     /* 计算并填充 CRC */
     pDDSState->crc = MT_Crc32((uint32_t*)pDDSState, 
                                (sizeof(DDS_LowState) / sizeof(uint32_t)) - 1);

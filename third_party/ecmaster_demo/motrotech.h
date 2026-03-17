@@ -118,14 +118,19 @@ typedef struct _DDS_MotorState
 } DDS_MotorState;
 
 /* [DDS 兼容] 底层命令结构体 - 和 DDS LowCmd_ 对应
- * 
+ *
  * 注意：DDS 使用 sequence<MotorCmd_>，这里用固定数组
  * DDS_MOTOR_COUNT = 28 (全部电机)
- * 实际使用 motor_cmd[15] ~ motor_cmd[21] (共 7 个)
+ * 实际使用 motor_cmd[8~11](躯干) + motor_cmd[12~13](头) + motor_cmd[15~28](臂) 共 20 个
  */
 #define DDS_MOTOR_COUNT   28    /* DDS 传输的电机总数 */
-#define DDS_MOTOR_OFFSET  15    /* 我们使用的电机起始索引 */
-#define DDS_MOTOR_USED    14    /* 我们实际使用的电机数量 (15-28) */
+#define DDS_TRUNK_OFFSET 8      /* 躯干电机 DDS 起始索引 (8-11) */
+#define DDS_TRUNK_COUNT 4       /* 躯干电机数量 */
+#define DDS_HEAD_OFFSET 12      /* 头部电机 DDS 起始索引 (12-13) */
+#define DDS_HEAD_COUNT 2        /* 头部电机数量 */
+#define DDS_MOTOR_OFFSET 15     /* 臂电机 DDS 起始索引 (15-28) */
+#define DDS_ARM_COUNT 14        /* 臂电机数量 */
+#define DDS_MOTOR_USED 20 /* 实际使用的 EtherCAT 电机总数 (躯干4 + 头2 + 臂14) */
 
 typedef struct _DDS_LowCmd
 {
@@ -182,11 +187,11 @@ typedef struct _MotorState_
 /*-DEFINES-------------------------------------------------------------------*/
 #define MOTROTECH_VERS_MAJ             0   /* major version */             
 #define MOTROTECH_VERS_MIN             0   /* minor version */             
-#define MOTROTECH_VERS_SERVICEPACK     6   /* service pack */           
-#define MOTROTECH_VERS_BUILD           0   /* build number */   
+#define MOTROTECH_VERS_SERVICEPACK     6   /* service pack */
+#define MOTROTECH_VERS_BUILD 0             /* build number */
 
-#define MAX_SLAVE_NUM             16   // 支持最多 16 个从站
-#define MAX_AXIS_NUM              16   // 支持最多 16 个轴
+#define MAX_SLAVE_NUM 22 // 支持最多 22 个从站 (躯干4+头2+臂14+非电机2)
+#define MAX_AXIS_NUM 22  // 支持最多 22 个轴
 
 /* 一个 slave 上可能有多个轴（多轴伺服/多通道），该示例用 “对象索引 + 轴号 * OBJOFFSET” 来区分各轴对象 */
 #define OBJOFFSET                 0x800
@@ -232,9 +237,21 @@ typedef struct _MotorState_
 #define DRV_OBJ_TORQUE_OFFSET               0x60B2
 #define DRV_OBJ_POS_OPTION_MODE             0x60F2
 #define DRV_OBJ_FOLLOWING_ERROR             0x60F4
-#define DRV_OBJ_DIGITAL_INPUTS              0x60FD
-#define DRV_OBJ_DIGITAL_OUTPUTS             0x60FE
+/* 0x60FD/0x60FE：仅当从站支持且 ENI 映射时有效；TCHL 系列手册明确不可 PDO 映射，此处仅兼容其他驱动 */
+#define DRV_OBJ_BRAKE_STATUS 0x60FD
+#define DRV_OBJ_MANUAL_BRAKE 0x60FE
 #define DRV_OBJ_TARGET_VELOCITY             0x60FF
+/* 抱闸（TCHL 手册）
+ * 正常运行与无抱闸电机完全一致：仅 6040h 使能/去使能 + 运动指令，无需额外抱闸控制指令；
+ * 抱闸的打开/闭合由驱动器根据 6040h 与 Pr1.54~1.57 自动完成（安全优先 + 简化操作）。
+ * - 初始化：SDO 配置抱闸时序参数（Pr1.54~1.57）一次即可，推荐按负载调整。
+ * - 6040h bit8 未启用；6041h bit9 可 PDO 读取抱闸状态（可选）。Pr8.30(0x381E) 仅调试用 SDO。*/
+#define DRV_OBJ_PR1_54_SERVO_ON_DELAY_MS   0x3136  /* Pr1.54 伺服ON→抱闸打开延时 ms */
+#define DRV_OBJ_PR1_55_BRAKE_CLOSE_OFF_MS  0x3137  /* Pr1.55 抱闸关闭→伺服OFF 延时 ms */
+#define DRV_OBJ_PR1_56_BRAKE_SPEED_RPM     0x3138  /* Pr1.56 抱闸关闭速度阈值 rpm */
+#define DRV_OBJ_PR1_57_SERVO_OFF_BRAKE_MS  0x3139  /* Pr1.57 伺服OFF→抱闸关闭延时 ms */
+#define DRV_OBJ_QUICK_STOP_OPTION          0x605A  /* Quick Stop Option Code */
+#define DRV_OBJ_PR8_30_FORCE_BRAKE_OPEN    0x381E  /* Pr8.30 强制抱闸打开：仅调试、仅 SDO；仅伺服去使能且速度 0 时生效，重新使能后自动复位为 0 */
 
 /* 你文档里提到的一些“可选反馈对象”（是否能进 PDO 取决于 ENI/从站支持） */
 #define DRV_OBJ_MCU_TEMPERATURE             0x3008
@@ -284,6 +301,7 @@ typedef struct _MotorState_
 #define DRV_STAT_VOLTAGE_ENABLED        0x0010          /* Bit 4: Optional bit: Voltage enabled */
 #define DRV_STAT_QUICK_STOP             0x0020          /* Bit 5: Optional bit: Quick stop      */
 #define DRV_STAT_SWITCH_ON_DIS          0x0040          /* Bit 6: Switch on disabled */
+#define STATUSWORD_BRAKE_OPEN           0x0200          /* Bit 9: TCHL 抱闸状态反馈，1=打开 0=闭合（可 PDO 映射 6041h 读取）*/
 #define DRV_STAT_STATUS_TOGGLE          0x0400          /* Bit 10: Optional bit: Status toggle (csp, csv mode) */
 #define DRV_STAT_VELOCITY_ZERO          0x0400          /* Bit 10: Optional bit: Velocity 0 (ip mode) */
 #define DRV_STAT_OP_MODE_CSP            0x1000          /* Bit 12: Optional bit: CSP drive follows the command value */
@@ -431,9 +449,11 @@ typedef struct _Motor_Type
 
 	/*-PDO_INPUT（从站上报给主站的输入区）------------------------------------------*/
 	EC_T_WORD*  pwErrorCode;          /* 0x603F: Error Code（故障码） */
-	EC_T_WORD*  pwStatusWord;         /* 0x6041: StatusWord（状态字，用于状态机判定） */
-	EC_T_INT*   pnActPosition;        /* 0x6064: Position Actual Value */
-	EC_T_INT*   pnActVelocity;        /* 0x606C: Velocity Actual Value */
+	EC_T_WORD*  pwStatusWord;         /* 0x6041: StatusWord；TCHL 抱闸状态由 bit9 反馈（1=打开 0=闭合） */
+    EC_T_BYTE* pbyBrakeStatus; /* 0x60FD：抱闸状态（仅当从站支持且 ENI 映射时）；TCHL 不可 PDO 映射，用 6041h bit9 代替 */
+    EC_T_BYTE* pbyManualBrake; /* 0x60FE：手动抱闸 RPDO（仅当从站支持时）；TCHL 不可 PDO 映射 */
+    EC_T_INT* pnActPosition;   /* 0x6064: Position Actual Value */
+    EC_T_INT*   pnActVelocity;        /* 0x606C: Velocity Actual Value */
 	EC_T_WORD*  pwActTorque;          /* 0x6077: Torque Actual Value */
 	EC_T_DWORD* pdwActFollowErr;      /* 0x60F4: Following Error */
 	EC_T_WORD*  pwInput_1;            /* 0x6000/1: 数字输入1（示例） */
@@ -469,6 +489,8 @@ typedef struct _Motor_Type
 } My_Motor_Type;
 
 /* 一个 slave（按固定站地址）对应多少轴（wAxisCnt） */
+#define TRUNK_AXIS_COUNT 4 /* 躯干 4 轴为带抱闸电机（内部轴 0-3），需 SDO 配置与状态机联动 */
+
 typedef struct _SLAVE_MOTOR_TYPE
 {
 	EC_T_WORD           wStationAddress;
@@ -514,6 +536,15 @@ EC_T_BOOL  MT_SetAxisUnitScale(EC_T_WORD wAxis, EC_T_LREAL encoder_cpr, EC_T_LRE
  * 参数单位：弧度 (rad)，函数内部自动转换为编码器计数 (PUU)
  */
 EC_T_BOOL  MT_SetDriveSoftLimits(EC_T_WORD wAxis, EC_T_LREAL fMinLimitRad, EC_T_LREAL fMaxLimitRad);
+
+/* [躯干抱闸 TCHL] 初始化时对躯干 4 轴 (0-3) 下发抱闸时序 SDO（Pr1.54~1.57、0x605A）一次。
+ * 正常运行与无抱闸电机一致：使能→运动→停止→去使能，抱闸由驱动器自动完成；调试手动盘车用 SDO 0x381E=128。*/
+EC_T_BOOL MT_ConfigureTrunkBrakeSDO(EC_T_VOID);
+
+/** 躯干强制解开抱闸（调试/手动盘车）：SDO 写 Pr8.30(0x381E)=128，仅伺服去使能且速度 0 时生效，重新使能后驱动器自动复位。 */
+EC_T_BOOL MT_TrunkBrakeOpenSDO(EC_T_VOID);
+/** 躯干恢复抱闸自动控制：SDO 写 Pr8.30(0x381E)=0，用于手动盘车完成后恢复。 */
+EC_T_BOOL MT_TrunkBrakeCloseSDO(EC_T_VOID);
 
 /* [2026-01-27] 将当前位置设置为零点 (Homing Method 35)
  * 用于 setcenter 命令：运动到中心点后调用此函数

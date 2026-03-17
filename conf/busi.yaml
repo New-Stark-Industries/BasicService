@@ -3,10 +3,10 @@ test_property: "test property value"
 
 # [2026-01-16] 目的：EC-Master demo 配置（方案1：BasicService 内嵌 demo）
 ethercat_demo:
-  # 目的：指定 Linux 网卡名（sockraw 模式），例如 "eth0"
-  if_name: "enP2p33s0"
+  # 目的：指定 Linux 网卡名（sockraw 模式），例如 "br0"
+  if_name: "br0"
   # 目的：指定 ENI 文件路径（.xml）
-  eni_path: "/home/stark/src/EC-Master/eni.xml"
+  eni_path: "conf/arm-b_eni.xml"
   # 目的：主站周期（微秒）
   cycle_us: 1000
   # 目的：demo 运行时长（毫秒），0=默认/无限

@@ -1,6 +1,7 @@
 
 # cmake version
 cmake_minimum_required(VERSION 3.28.3)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 # project name
 project(BasicService VERSION 1.0.0.0 LANGUAGES CXX)
