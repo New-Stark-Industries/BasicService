@@ -2732,15 +2732,17 @@ static void* CmdThread(void*)
                             // DDS 索引从 1 开始
                             int dds_index = i + 1;
                             
-                            // 确定 bus_type 和 motor_type（1-8 为步科，其余为同川）
+                            // 确定 bus_type、motor_type、motor_mode（步科: 转向CSP/车轮CSV，同川: MIT）
                             const char* bus_type = (i >= 14 && i <= 27) ? "ethercat" : "can";
                             const char* motor_type = (i < 8) ? "步科" : "同川";
+                            const char* motor_mode = (i < 8) ? ((i < 4) ? "CSP" : "CSV") : "MIT";
 
                             json << "      {\n";
                             json << "        \"index\": " << dds_index << ",\n";
                             json << "        \"name\": \"" << all_joint_names[i] << "\",\n";
                             json << "        \"bus_type\": \"" << bus_type << "\",\n";
                             json << "        \"motor_type\": \"" << motor_type << "\",\n";
+                            json << "        \"motor_mode\": \"" << motor_mode << "\",\n";
                             json << "        \"position\": " << positions[i] << ",\n";
                             json << "        \"direction\": " << directions[i] << ",\n";
                             json << "        \"negate\": "
