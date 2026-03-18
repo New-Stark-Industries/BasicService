@@ -537,6 +537,32 @@ EC_T_DWORD MT_Setup(T_EC_DEMO_APP_CONTEXT *pAppContext) {
                       "Motrotech: MyAxis[%d].pbyModeOfOperation = 0x%08X",
                       MyAxis_num_tmp,
                       My_Motor[MyAxis_num_tmp].pbyModeOfOperation));
+          } else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MIT_TARGET_POS && dwAxis == 0) {
+            /* 0x4000 MIT TargetPos（每台从站独立，不加 OBJOFFSET，仅 axis0 匹配）*/
+            My_Motor[MyAxis_num_tmp].pfMitTargetPos =
+                (EC_T_REAL *)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitTargetPos = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitTargetPos));
+          } else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MIT_TARGET_VEL && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitTargetVel =
+                (EC_T_REAL *)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitTargetVel = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitTargetVel));
+          } else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MIT_TARGET_TOR && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitTargetTor =
+                (EC_T_REAL *)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitTargetTor = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitTargetTor));
+          } else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MIT_KP && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitKp =
+                (EC_T_REAL *)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitKp = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitKp));
+          } else if (pProcessVarInfoOut[i].wIndex == DRV_OBJ_MIT_KD && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitKd =
+                (EC_T_REAL *)&(pbyPDOut[pProcessVarInfoOut[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitKd = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitKd));
           } else if (pProcessVarInfoOut[i].wIndex ==
                      DRV_OBJ_DIGITAL_OUTPUT +
                          dwAxis * OBJOFFSET) // 0x7010 - Output 1
@@ -726,6 +752,28 @@ EC_T_DWORD MT_Setup(T_EC_DEMO_APP_CONTEXT *pAppContext) {
           {
             My_Motor[MyAxis_num_tmp].pwDcLinkVoltage =
                 (EC_T_WORD *)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+          } else if (pProcessVarInfoIn[i].wIndex == DRV_OBJ_MIT_ACTUAL_POS && dwAxis == 0) {
+            /* 0x4007 MIT ActualPos（每台从站独立，不加 OBJOFFSET）*/
+            My_Motor[MyAxis_num_tmp].pfMitActualPos =
+                (EC_T_REAL *)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitActualPos = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitActualPos));
+          } else if (pProcessVarInfoIn[i].wIndex == DRV_OBJ_MIT_ACTUAL_VEL && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitActualVel =
+                (EC_T_REAL *)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitActualVel = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitActualVel));
+          } else if (pProcessVarInfoIn[i].wIndex == DRV_OBJ_MIT_ACTUAL_TOR && dwAxis == 0) {
+            My_Motor[MyAxis_num_tmp].pfMitActualTor =
+                (EC_T_REAL *)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitActualTor = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitActualTor));
+          } else if (pProcessVarInfoIn[i].wIndex == DRV_OBJ_MIT_EXT_TOR && dwAxis == 0) {
+            /* 0x4020 MIT 外置力矩传感器（float, N·m）*/
+            My_Motor[MyAxis_num_tmp].pfMitExtTor =
+                (EC_T_REAL *)&(pbyPDIn[pProcessVarInfoIn[i].nBitOffs / 8]);
+            EcLogMsg(EC_LOG_LEVEL_INFO, (pEcLogContext, EC_LOG_LEVEL_INFO,
+                "Motrotech: MyAxis[%d].pfMitExtTor = 0x%08X", MyAxis_num_tmp, My_Motor[MyAxis_num_tmp].pfMitExtTor));
           } else {
             // EcLogMsg(EC_LOG_LEVEL_INFO,(pEcLogContext,
             // EC_LOG_LEVEL_INFO,"Motrotech: My_Slave[%d] Input undefine the
@@ -897,23 +945,34 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
     if (pDemoAxis->pbyModeOfOperation) {
       // 0x6061 运行模式显示 (虽然指针名为 pbyModeOfOperation 但在映射时我们通常也映射了 0x6061)
       // 注意：这里假设 pbyModeOfOperation 指向的是 0x6061，如果 ENI 只映射了 0x6060 则读不到真实模式
-      st.mode = *pDemoAxis->pbyModeOfOperation; 
+      st.mode = *pDemoAxis->pbyModeOfOperation;
     }
-    if (pDemoAxis->pnActPosition) {
-      /* [2026-01-19] 作用：把 0x6064(ActualPosition, int32 PUU) 换算成 rad 回填
-       * [2026-02-10] 减去软件零点偏移：物理编码器值不变，用偏移实现"虚拟零点" */
-      st.q_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActPosition - pDemoAxis->sdwZeroOffset) * pDemoAxis->fRadPerCnt);
-    }
-    if (pDemoAxis->pnActVelocity) {
-      /* [2026-01-19] 作用：把 0x606C(ActualVelocity, int32 PUU/s) 换算成 rad/s 回填 */
-      st.dq_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActVelocity) * pDemoAxis->fRadPerCnt);
+    /* 判断当前是否 MIT 模式（按有符号解释 0x6061 的值）*/
+    const bool bMitMode = ((EC_T_SBYTE)st.mode == (EC_T_SBYTE)DRIVE_MODE_MIT);
+    if (bMitMode && pDemoAxis->pfMitActualPos) {
+      /* MIT 模式：反馈直接是 float rad，不需要 PUU 换算 */
+      st.q_fb   = pDemoAxis->pfMitActualPos ? *pDemoAxis->pfMitActualPos : 0.0f;
+      st.dq_fb  = pDemoAxis->pfMitActualVel ? *pDemoAxis->pfMitActualVel : 0.0f;
+      st.tau_fb = pDemoAxis->pfMitActualTor ? *pDemoAxis->pfMitActualTor : 0.0f;
+      st.tau_ext= pDemoAxis->pfMitExtTor    ? *pDemoAxis->pfMitExtTor    : 0.0f;
+    } else {
+      if (pDemoAxis->pnActPosition) {
+        /* [2026-01-19] 作用：把 0x6064(ActualPosition, int32 PUU) 换算成 rad 回填
+         * [2026-02-10] 减去软件零点偏移：物理编码器值不变，用偏移实现"虚拟零点" */
+        st.q_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActPosition - pDemoAxis->sdwZeroOffset) * pDemoAxis->fRadPerCnt);
+      }
+      if (pDemoAxis->pnActVelocity) {
+        /* [2026-01-19] 作用：把 0x606C(ActualVelocity, int32 PUU/s) 换算成 rad/s 回填 */
+        st.dq_fb = (EC_T_REAL)((EC_T_LREAL)(*pDemoAxis->pnActVelocity) * pDemoAxis->fRadPerCnt);
+      }
+      st.ddq_fb = 0.0f; /* 文档：不支持，需由 dq_fb 差分计算 */
+      /* [2026-01-19] 目的：0x6077 实际扭矩 -> N.m (按 0.1% 换算) */
+      if (pDemoAxis->pwActTorque) {
+        st.tau_fb = (EC_T_REAL)(EC_T_SWORD)EC_GETWORD(pDemoAxis->pwActTorque) * 0.001f;
+      }
+      st.tau_ext = 0.0f;
     }
     st.ddq_fb = 0.0f; /* 文档：不支持，需由 dq_fb 差分计算 */
-    
-    /* [2026-01-19] 目的：0x6077 实际扭矩 -> N.m (按 0.1% 换算) */
-    if (pDemoAxis->pwActTorque) {
-      st.tau_fb = (EC_T_REAL)(EC_T_SWORD)EC_GETWORD(pDemoAxis->pwActTorque) * 0.001f; 
-    }
     
     /* 温度/电压：只有 ENI 映射了相应对象，指针才会非空 */
     st.temperature[0] = (pDemoAxis->psTempMcu) ? (*pDemoAxis->psTempMcu) : 0;
@@ -927,15 +986,16 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
 
     /* Mode of Operation（0x6060）
      * - demo 默认在 MT_Init 中设为 CSP（8）
-     * - 如果 0x6060 被映射到 PDO，就在这里每周期刷新一次（很多驱动允许）
+     * - MIT 模式时每周期必须写 -6，否则无命令周期会写成 8 导致驱动切回 CSP
      */
     if (EC_NULL != pDemoAxis->pbyModeOfOperation) {
-      /* 写 0x6060 Modes of operation（PDO 映射存在时才可写）
-       * - demo 默认写 CSP(8)
-       * - 如果你们用自定义模式/自定义对象，这里通常会改成写你们的 mode
-       */
-      EC_SETBITS(pDemoAxis->pbyModeOfOperation,
-                 (EC_T_BYTE *)&pDemoAxis->eModesOfOperation, 0, 8);
+      if ((EC_T_SBYTE)S_GlobalDriveMode == (EC_T_SBYTE)DRIVE_MODE_MIT
+          && pDemoAxis->pfMitTargetPos != EC_NULL) {
+        *pDemoAxis->pbyModeOfOperation = (EC_T_BYTE)(EC_T_SBYTE)DRIVE_MODE_MIT;
+      } else {
+        EC_SETBITS(pDemoAxis->pbyModeOfOperation,
+                   (EC_T_BYTE *)&pDemoAxis->eModesOfOperation, 0, 8);
+      }
     }
     /* 只有在 OP_ENABLED（已使能）时才生成运动命令，否则进行“对齐初始化”：
      * - 先让 TargetPosition = ActualPosition
@@ -1082,6 +1142,18 @@ EC_T_VOID MT_Workpd(T_EC_DEMO_APP_CONTEXT *pAppContext) {
             *pDemoAxis->pbyModeOfOperation = DRIVE_MODE_CSP;
         }
       }
+      else if ((EC_T_SBYTE)cmd.drive_mode == (EC_T_SBYTE)DRIVE_MODE_MIT) {
+        // MIT 模式：kp/kd 每周期通过 PDO 下发（不走 SDO），单位均为物理量（rad/rad/s/N·m）
+        if (pDemoAxis->pbyModeOfOperation != EC_NULL) {
+            const EC_T_SBYTE bMitVal = (EC_T_SBYTE)DRIVE_MODE_MIT; // -6
+            *pDemoAxis->pbyModeOfOperation = (EC_T_BYTE)bMitVal;   // 写 0x6060 = -6（有符号字节）
+        }
+        if (pDemoAxis->pfMitTargetPos != EC_NULL) *pDemoAxis->pfMitTargetPos = cmd.q;
+        if (pDemoAxis->pfMitTargetVel != EC_NULL) *pDemoAxis->pfMitTargetVel = cmd.dq;
+        if (pDemoAxis->pfMitTargetTor != EC_NULL) *pDemoAxis->pfMitTargetTor = cmd.tau;
+        if (pDemoAxis->pfMitKp        != EC_NULL) *pDemoAxis->pfMitKp        = cmd.kp;
+        if (pDemoAxis->pfMitKd        != EC_NULL) *pDemoAxis->pfMitKd        = cmd.kd;
+      }
       else if (cmd.drive_mode == DRIVE_MODE_CST) {
         // CST 模式：纯力矩控制
         EC_T_LREAL fRatedTorque = pDemoAxis->fRatedTorque > 0 ? pDemoAxis->fRatedTorque : 1.0;
@@ -1157,6 +1229,7 @@ DriveMode MT_GetGlobalDriveMode(EC_T_VOID)
 const char* MT_GetDriveModeName(DriveMode mode)
 {
   switch (mode) {
+    case DRIVE_MODE_MIT: return "MIT";
     case DRIVE_MODE_PT:  return "PT";
     case DRIVE_MODE_CSP: return "CSP";
     case DRIVE_MODE_CST: return "CST";
@@ -1171,7 +1244,15 @@ EC_T_VOID MT_SetMotorCmd(EC_T_WORD wAxis, const MotorCmd_* pCmd)
     return;
   }
 
-  /* [2026-02-10] kp/kd SDO 下发逻辑
+  /* MIT 模式下 kp/kd 通过 PDO 每周期下发，不走 SDO；直接全量写入缓冲区 */
+  const bool bMIT = ((EC_T_SBYTE)pCmd->drive_mode == (EC_T_SBYTE)DRIVE_MODE_MIT);
+  if (bMIT) {
+    S_MotorCmd[wAxis] = *pCmd;
+    S_MotorCmdValid[wAxis] = EC_TRUE;
+    return;
+  }
+
+  /* [2026-02-10] kp/kd SDO 下发逻辑（非 MIT 模式）
    * kp(0x3500) 和 kd(0x3501) 是驱动器位置环增益，通过 CoE SDO 下载。
    *
    * 设计要点：

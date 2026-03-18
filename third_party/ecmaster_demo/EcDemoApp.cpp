@@ -182,7 +182,8 @@ struct CalibData {
     bool limits_written_to_drive;       // 软限位是否已写入驱动器
     int total_joints;                   // 关节总数
     float calib_positions[TOTAL_JOINTS]; // 标定时的编码器位置（负极限）
-    int directions[TOTAL_JOINTS];       // 方向 (0=正向, -1=负向)
+    int directions[TOTAL_JOINTS];       // 方向 (0=正向, -1=负向)，编码值递增=0/递减=-1
+    int limit_directions[TOTAL_JOINTS]; // 限位方向：0=负限位侧(URDF), -1=正限位侧(URDF)，与标定里 limit_direction 一致
     float range_min[TOTAL_JOINTS];      // 运动范围最小值
     float range_max[TOTAL_JOINTS];      // 运动范围最大值
     float soft_limit_min[TOTAL_JOINTS];  // 软件限位最小值（计算得出）
@@ -342,17 +343,55 @@ static bool LoadCalibrationFile(const char* filename)
         g_CalibData.directions[i] = ParseJsonInt(content, idx_pos, "direction");
         g_CalibData.range_min[i] = ParseJsonFloat(content, idx_pos, "range_min");
         g_CalibData.range_max[i] = ParseJsonFloat(content, idx_pos, "range_max");
+        // limit_direction：若 JSON 中有 "limit_direction" 则解析，否则用默认表
+        {
+            std::string key = "\"limit_direction\":";
+            size_t kpos = content.find(key, idx_pos);
+            size_t next_block = content.find("\"index\":", idx_pos + 8);
+            if (kpos != std::string::npos && (next_block == std::string::npos || kpos < next_block)) {
+                g_CalibData.limit_directions[i] = ParseJsonInt(content, kpos, "limit_direction");
+            } else {
+                static const int default_limit_directions[TOTAL_JOINTS] = {
+                    0,  0,  0, 0,             // 1-4: 转向
+                    0,  0,  0, 0,             // 5-8: 车轮
+                    0,  -1, 0, 0,             // 9-12: waist1, waist2, waist3, body
+                    -1, -1,                   // 13-14: 头部
+                    -1, -1, 0, 0,  -1, -1, 0, // 15-21: 左臂 (EtherCAT)
+                    -1, 0,  0, -1, -1, 0,  -1 // 22-28: 右臂 (EtherCAT)
+                };
+                g_CalibData.limit_directions[i] = default_limit_directions[i];
+            }
+        }
         
-        // 计算软件限位
-        float total_range = g_CalibData.range_max[i] - g_CalibData.range_min[i];
-        if (g_CalibData.directions[i] == 0) {
-            // 正向关节：标定位置是最小值
-            g_CalibData.soft_limit_min[i] = g_CalibData.calib_positions[i];
-            g_CalibData.soft_limit_max[i] = g_CalibData.calib_positions[i] + total_range;
-        } else {
-            // 负向关节：标定位置是最大值
-            g_CalibData.soft_limit_max[i] = g_CalibData.calib_positions[i];
-            g_CalibData.soft_limit_min[i] = g_CalibData.calib_positions[i] - total_range;
+        // 软件限位：用 negate (= direction != limit_direction) 决定标定端，再与 [r_lo, r_hi] 取交
+        // negate==false：标定在低端 → [calib, calib+total_range]；negate==true：标定在高端 → [calib-total_range, calib]
+        {
+            float r_lo = (g_CalibData.range_min[i] < g_CalibData.range_max[i])
+                ? g_CalibData.range_min[i] : g_CalibData.range_max[i];
+            float r_hi = (g_CalibData.range_min[i] > g_CalibData.range_max[i])
+                ? g_CalibData.range_min[i] : g_CalibData.range_max[i];
+            float total_range = r_hi - r_lo;
+            float cal = g_CalibData.calib_positions[i];
+            int negate = (g_CalibData.directions[i] != g_CalibData.limit_directions[i]) ? 1 : 0;
+
+            float computed_min, computed_max;
+            if (negate == 0) {
+                computed_min = cal;
+                computed_max = cal + total_range;
+            } else {
+                computed_min = cal - total_range;
+                computed_max = cal;
+            }
+            float want_min = (computed_min <= computed_max) ? computed_min : computed_max;
+            float want_max = (computed_min <= computed_max) ? computed_max : computed_min;
+            if (want_min < r_lo) want_min = r_lo;
+            if (want_max > r_hi) want_max = r_hi;
+            if (want_min > want_max) {
+                want_min = r_lo;
+                want_max = r_hi;
+            }
+            g_CalibData.soft_limit_min[i] = want_min;
+            g_CalibData.soft_limit_max[i] = want_max;
         }
     }
     
@@ -361,13 +400,14 @@ static bool LoadCalibrationFile(const char* filename)
     printf("[标定] 已加载标定文件: %s\n", filename);
     printf("[标定] 关节参数:\n");
     for (int i = 0; i < g_CalibData.total_joints; i++) {
-        printf("  %s: pos=%.4f, dir=%d, range=[%.2f, %.2f], limit=[%.4f, %.4f]\n", 
+        printf("  %s: pos=%.4f, dir=%d, limit_dir=%d, range=[%.2f, %.2f], limit=[%.4f, %.4f]\n",
                g_CalibData.joint_names[i],
                g_CalibData.calib_positions[i],
                g_CalibData.directions[i],
+               g_CalibData.limit_directions[i],
                g_CalibData.range_min[i],
                g_CalibData.range_max[i],
-               g_CalibData.soft_limit_min[i], 
+               g_CalibData.soft_limit_min[i],
                g_CalibData.soft_limit_max[i]);
     }
     
@@ -397,7 +437,7 @@ static bool GetCANMotorPositionRad(uint8_t can_channel, uint8_t node_id, float* 
     uint8_t rsp_sub = 0;
     uint8_t rsp_data[4] = { 0 };
 
-    if (!basic_service::mcu::CanRecv(&rsp_can_id, &rsp_cmd, &rsp_obj, &rsp_sub, rsp_data, 500))
+    if (!basic_service::mcu::CanRecv(&rsp_can_id, &rsp_cmd, &rsp_obj, &rsp_sub, rsp_data, 80))
         return false;
 
     // 解析位置：4 字节小端 int32
@@ -428,7 +468,7 @@ static bool CANMotorLoosen(uint8_t can_channel, uint8_t node_id)
     uint8_t rsp_sub = 0;
     uint8_t rsp_data[4] = { 0 };
 
-    if (!basic_service::mcu::CanRecv(&rsp_can_id, &rsp_cmd, &rsp_obj, &rsp_sub, rsp_data, 500))
+    if (!basic_service::mcu::CanRecv(&rsp_can_id, &rsp_cmd, &rsp_obj, &rsp_sub, rsp_data, 80))
         return false;
 
     return true;
@@ -1076,6 +1116,7 @@ EC_T_DWORD EcDemoApp(T_EC_DEMO_APP_CONTEXT* pAppContext)
     if (dwRes != EC_E_NOERROR)
     {
         EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "Cannot start set master state to INIT: %s (0x%lx))\n", ecatGetText(dwRes), dwRes));
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "[提醒] 主站未进入 OP，请检查 ENI 与总线从站是否一致（如 Slave mismatch / Bus configuration mismatch）。\n"));
         dwRetVal = dwRes;
         goto Exit;
     }
@@ -1095,6 +1136,7 @@ EC_T_DWORD EcDemoApp(T_EC_DEMO_APP_CONTEXT* pAppContext)
     if (dwRes != EC_E_NOERROR)
     {
         EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "Cannot start set master state to PREOP: %s (0x%lx))\n", ecatGetText(dwRes), dwRes));
+        EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "[提醒] 主站未进入 OP，请检查 ENI 与总线从站配置。\n"));
         dwRetVal = dwRes;
         goto Exit;
     }
@@ -1137,6 +1179,7 @@ EC_T_DWORD EcDemoApp(T_EC_DEMO_APP_CONTEXT* pAppContext)
                     EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "Cannot get DCM status! %s (0x%08X)\n", ecatGetText(dwRes), dwRes));
                 }
             }
+            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "[提醒] 主站未进入 OP（SAFEOP 失败，多为 DCM/时钟同步问题）。\n"));
             dwRetVal = dwRes;
             goto Exit;
         }
@@ -1147,6 +1190,7 @@ EC_T_DWORD EcDemoApp(T_EC_DEMO_APP_CONTEXT* pAppContext)
         if (dwRes != EC_E_NOERROR)
         {
             EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "Cannot start set master state to OP: %s (0x%lx))\n", ecatGetText(dwRes), dwRes));
+            EcLogMsg(EC_LOG_LEVEL_ERROR, (pEcLogContext, EC_LOG_LEVEL_ERROR, "[提醒] 主站未进入 OP，请检查从站状态与 PDO 配置。\n"));
             dwRetVal = dwRes;
             goto Exit;
         }
@@ -1992,11 +2036,12 @@ static void* CmdThread(void*)
     printf("[CMD] === 紧急命令 ===\n");
     printf("  estop / e                                   紧急停止（所有轴立即释放）\n");
     printf("\n[CMD] === 控制命令 ===\n");
-    printf("  mode pt|csp|cst                             选择全局控制模式\n");
+    printf("  mode pt|csp|cst|mit                          选择全局控制模式\n");
     printf("  set <axis> ...                              根据当前模式下发控制\n");
     printf("    PT模式:  set <axis> <tau> <kp> <q> <kd> <dq>\n");
     printf("    CSP模式: set <axis> <q> <dq>\n");
     printf("    CST模式: set <axis> <tau>\n");
+    printf("    MIT模式: set <axis> <q> <dq> <tau> <kp> <kd>\n");
     printf("  enable <axis>                               使能电机\n");
     printf("  stop <axis>                                 停机/释放\n");
     printf("\n[CMD] === 运动功能 ===\n");
@@ -2032,6 +2077,7 @@ static void* CmdThread(void*)
             printf("║   mode pt                切换到 PT 模式（阻抗控制）              ║\n");
             printf("║   mode csp               切换到 CSP 模式（位置控制）[默认]       ║\n");
             printf("║   mode cst               切换到 CST 模式（纯力矩控制）           ║\n");
+            printf("║   mode mit               切换到 MIT 模式（驱动器内 PD+前馈）     ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【控制命令】                                                     ║\n");
             printf("║   enable <axis>          使能电机并保持当前位置                  ║\n");
@@ -2044,6 +2090,9 @@ static void* CmdThread(void*)
             printf("║              q=目标位置(rad), dq=速度(rad/s)                     ║\n");
             printf("║     CST模式: set <axis> <tau>                                    ║\n");
             printf("║              tau=目标力矩(N.m)                                   ║\n");
+            printf("║     MIT模式: set <axis> <q> <dq> <tau> <kp> <kd>                ║\n");
+            printf("║              q=期望位置(rad), dq=期望速度(rad/s)                 ║\n");
+            printf("║              tau=前馈力矩(N.m), kp=刚度, kd=阻尼                ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【运动功能】                                                     ║\n");
             printf("║   home                   回零（顺序：14→1）                      ║\n");
@@ -2053,8 +2102,8 @@ static void* CmdThread(void*)
             printf("║   calib                  标定（记录负极限位置）                  ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【状态查询】                                                     ║\n");
-            printf("║   show                   显示所有轴位置                          ║\n");
-            printf("║   get <axis>             获取单轴详细状态                        ║\n");
+            printf("║   show                   显示所有轴位置（MIT模式额外显示外力矩） ║\n");
+            printf("║   get <axis>             获取单轴详细状态（MIT模式显示ext_tor）  ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 【DDS 调试】 模拟 DDS 通讯（一帧14轴数据）                       ║\n");
             printf("║   dds                    发送一帧（使用当前位置）                ║\n");
@@ -2268,8 +2317,14 @@ static void* CmdThread(void*)
                 MT_SetGlobalDriveMode(DRIVE_MODE_CST);
                 printf("[CMD] OK: 全局模式 = CST (力矩控制)\n");
                 printf("     set 用法: set <axis> <tau>\n");
+            } else if (strcmp(mode_str, "mit") == 0) {
+                MT_SetGlobalDriveMode(DRIVE_MODE_MIT);
+                printf("[CMD] OK: 全局模式 = MIT (驱动器内 PD + 前馈)\n");
+                printf("     set 用法: set <axis> <q> <dq> <tau> <kp> <kd>\n");
+                printf("              q=期望位置(rad), dq=期望速度(rad/s), tau=前馈力矩(N.m)\n");
+                printf("              kp=刚度, kd=阻尼\n");
             } else {
-                printf("[CMD] 用法: mode pt|csp|cst\n");
+                printf("[CMD] 用法: mode pt|csp|cst|mit\n");
             }
             fflush(stdout);
             continue;
@@ -2350,7 +2405,7 @@ static void* CmdThread(void*)
                            can_show[i].ch,
                            can_show[i].id);
                 if (i < 3)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
             if (mcu_ok)
                 basic_service::mcu::Shutdown();
@@ -2376,6 +2431,17 @@ static void* CmdThread(void*)
                     printf("Axis %2d: %8.4f rad\n", i + 8, stR.q_fb);
                 } else {
                     printf("Axis %2d:   ----   \n", i + 8);
+                }
+                // MIT 模式时额外显示外置力矩传感器
+                bool lMit = gotL && ((EC_T_SBYTE)stL.mode == (EC_T_SBYTE)DRIVE_MODE_MIT);
+                bool rMit = gotR && ((EC_T_SBYTE)stR.mode == (EC_T_SBYTE)DRIVE_MODE_MIT);
+                if (lMit || rMit) {
+                    printf("  ");
+                    if (lMit) printf("  ExtTor: %7.3f Nm", stL.tau_ext);
+                    else      printf("                  ");
+                    printf("   |   ");
+                    if (rMit) printf("  ExtTor: %7.3f Nm", stR.tau_ext);
+                    printf("\n");
                 }
             }
             printf("  =========================================================\n");
@@ -2540,6 +2606,16 @@ static void* CmdThread(void*)
                         0, 0, -1, 0, -1, -1, 0,      // 22-28: 右臂
                     };
 
+                    // 关节限位为 urdf 的正为 -1，负为 0；negate = (directions != limit_drections)
+                    const int limit_drections[TOTAL_DOF] = {
+                        0,  0,  0, 0,             // 1-4: 转向
+                        0,  0,  0, 0,             // 5-8: 车轮
+                        0,  -1, 0, 0,            // 9-12: waist1, waist2, waist3, body
+                        -1, -1,                   // 13-14: 头部
+                        -1, -1, 0, 0,  -1, -1, 0, // 15-21: 左臂 (EtherCAT)
+                        -1, 0,  0, -1, -1, 0,  -1  // 22-28: 右臂 (EtherCAT)
+                    };
+
                     const float range_min[TOTAL_DOF] = {
                         -2.88,  -2.88,  -2.88,  -2.88,                          // 1-4
                         0,      0,      0,      0,                              // 5-8
@@ -2649,21 +2725,16 @@ static void* CmdThread(void*)
                         json << "  \"actuators\": {\n";
                         json << "    \"celebration_state\": false,\n";
                         json << "    \"timestamp\": " << now << ",\n";
+                        json << "    \"calib_version\": 2,\n";  /* 2 = 含 negate/limit_direction */
                         json << "    \"joints\": [\n";
                         
                         for (int i = 0; i < TOTAL_DOF; i++) {
                             // DDS 索引从 1 开始
                             int dds_index = i + 1;
                             
-                            // 确定 bus_type 和 motor_type
+                            // 确定 bus_type 和 motor_type（1-8 为步科，其余为同川）
                             const char* bus_type = (i >= 14 && i <= 27) ? "ethercat" : "can";
-                            const char* motor_type;
-                            if (i < 8)
-                                motor_type = "bk";
-                            else if (i >= 14 && i <= 27)
-                                motor_type = "tc";
-                            else
-                                motor_type = "unknown";
+                            const char* motor_type = (i < 8) ? "步科" : "同川";
 
                             json << "      {\n";
                             json << "        \"index\": " << dds_index << ",\n";
@@ -2672,6 +2743,10 @@ static void* CmdThread(void*)
                             json << "        \"motor_type\": \"" << motor_type << "\",\n";
                             json << "        \"position\": " << positions[i] << ",\n";
                             json << "        \"direction\": " << directions[i] << ",\n";
+                            json << "        \"negate\": "
+                                 << ((directions[i] != limit_drections[i]) ? "true" : "false")
+                                 << ",\n";
+                            json << "        \"limit_direction\": " << limit_drections[i] << ",\n";
                             json << "        \"range_min\": " << range_min[i] << ",\n";
                             json << "        \"range_max\": " << range_max[i] << "\n";
                             json << "      }" << (i < TOTAL_DOF - 1 ? "," : "") << "\n";
@@ -2680,6 +2755,7 @@ static void* CmdThread(void*)
                         json << "    ]\n";
                         json << "  }\n";
                         json << "}\n";
+                        json.flush();
                         json.close();
                         printf("[标定] 已生成配置文件: %s (共 %d 个关节)\n", CALIB_FILE_NAME, TOTAL_DOF);
                         
@@ -2856,7 +2932,7 @@ static void* CmdThread(void*)
 
         /* ============================================================================
          * setzero 命令：仅将当前位置设为零点 (SDO 0x3801=5)，不运动
-         * 与 setcenter 中的阶段3 相同：先切 IDLE 停稳，再逐轴写 0x3801=5，最后锁定零点。
+         * 流程：逐轴写 0x3801=5 置零，再锁定零点 (MOTION_CONTROL q=0)。
          * ============================================================================ */
         if (strcmp(line, "setzero") == 0) {
             printf("\n╔══════════════════════════════════════════════════════════════════╗\n");
@@ -2872,28 +2948,12 @@ static void* CmdThread(void*)
 
             int nAxes = g_CalibData.total_joints;
             printf("║ 轴数: %d                                                              ║\n", nAxes);
-            printf("║ 流程: 切 IDLE → 逐轴 SDO 0x3801=5 → 锁定零点                          ║\n");
+            printf("║ 流程: 逐轴 SDO 0x3801=5 置零 → 锁定零点                              ║\n");
             printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
             fflush(stdout);
 
-            /* 阶段1: 切 IDLE，电机停稳 */
-            printf("[setzero] 阶段1: 切 IDLE...\n");
-            fflush(stdout);
-            for (int i = 0; i < nAxes; i++) {
-                MotorCmd_ cmd{};
-                cmd.motion_func = MOTION_IDLE;
-                cmd.kp = 32.0f;
-                cmd.kd = 30.0f;
-                cmd.drive_mode = MT_GetGlobalDriveMode();
-                cmd.direction = (EC_T_SBYTE)g_CalibData.directions[i];
-                MT_SetMotorCmd((EC_T_WORD)i, &cmd);
-            }
-            OsSleep(500);
-            printf("[setzero] 阶段1: 已切 IDLE，电机停稳\n");
-            fflush(stdout);
-
-            /* 阶段2: 逐轴 SDO 0x3801=5 置零 */
-            printf("[setzero] 阶段2: 逐轴 SDO 0x3801=5 置零...\n");
+            /* 阶段1: 逐轴 SDO 0x3801=5 置零 */
+            printf("[setzero] 阶段1: 逐轴 SDO 0x3801=5 置零...\n");
             fflush(stdout);
             int success_count = 0;
             for (int i = 0; i < nAxes; i++) {
@@ -2907,8 +2967,8 @@ static void* CmdThread(void*)
             }
             OsSleep(200);
 
-            /* 阶段3: 锁定零点 (MOTION_CONTROL q=0) */
-            printf("[setzero] 阶段3: 锁定零点...\n");
+            /* 阶段2: 锁定零点 (MOTION_CONTROL q=0) */
+            printf("[setzero] 阶段2: 锁定零点...\n");
             fflush(stdout);
             for (int i = 0; i < nAxes; i++) {
                 MT_ResetPositionSync((EC_T_WORD)i);
@@ -2935,18 +2995,12 @@ static void* CmdThread(void*)
         /* ============================================================================
          * [2026-02-10] setcenter 命令：运动到关节中心点并设置为零点
          *
-         * 前提：当前位置在负极限（标定后的起始位置）
-         * 计算：中心点 = 当前位置 ± (|range_min| + |range_max|) / 2
-         *       direction = 0 时用 +，direction = -1 时用 -
+         * 中心点 = 范围的几何中心，公式：
+         *   center = current_pos + (|range_min|+|range_max|)/2 * limit_dir_sign * dir_sign
+         * 其中 limit_dir_sign = (limit_directions==0 ? +1 : -1)，dir_sign = (directions==0 ? +1 : -1)
+         * 组合效果即 negate = (direction != limit_direction)。零范围轴不移动。
          *
-         * 流程：
-         *   阶段1：所有轴同时运动到中心点（MOTION_CONTROL + CSP）
-         *   阶段2：全部到位后，切 IDLE（电机停稳）
-         *   阶段3：逐轴 SDO 写 0x3801=5 置零
-         *   阶段4：MOTION_CONTROL q=0 锁住零点（抗重力）
-         *
-         * 关键：阶段2 切 IDLE 防止周期线程在置零瞬间用旧目标下发，
-         *       阶段4 用 MOTION_CONTROL+q=0 主动抗重力锁住零点。
+         * 流程：阶段1 运动到中心点 → 阶段2 SDO 0x3801=5 置零 → 阶段3 锁定零点
          * ============================================================================ */
         if (strcmp(line, "setcenter") == 0 || strcmp(line, "setcenter 14") == 0) {
             printf("\n╔══════════════════════════════════════════════════════════════════╗\n");
@@ -2965,39 +3019,39 @@ static void* CmdThread(void*)
             float center_positions[TOTAL_JOINTS];
             printf("║ 计算各轴中心点位置...                                            ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
-            printf("║  轴号   当前位置    偏移量     目标中心点   方向                  ║\n");
+            printf("║  轴号   当前位置    目标中心点   dir  limit_dir  negate            ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             
             for (int i = 0; i < g_CalibData.total_joints; i++) {
                 MotorState_ st;
                 MT_GetMotorState((EC_T_WORD)i, &st);
                 float current_pos = st.q_fb;
+                float rmin = g_CalibData.range_min[i];
+                float rmax = g_CalibData.range_max[i];
+                int dir = g_CalibData.directions[i];
+                int limit_dir = g_CalibData.limit_directions[i];
+                int negate = (dir != limit_dir) ? 1 : 0;
                 
-                // 偏移量 = (|range_min| + |range_max|) / 2
-                float range_min_abs = g_CalibData.range_min[i];
-                if (range_min_abs < 0) range_min_abs = -range_min_abs;
-                float range_max_abs = g_CalibData.range_max[i];
-                if (range_max_abs < 0) range_max_abs = -range_max_abs;
-                float offset = (range_min_abs + range_max_abs) / 2.0f;
-                
-                // 根据 direction 决定方向
-                if (g_CalibData.directions[i] == 0) {
-                    center_positions[i] = current_pos + offset;
+                if (rmin == rmax) {
+                    center_positions[i] = current_pos;
                 } else {
-                    center_positions[i] = current_pos - offset;
+                    float rmin_abs = (rmin < 0) ? -rmin : rmin;
+                    float rmax_abs = (rmax < 0) ? -rmax : rmax;
+                    float half_range = (rmin_abs + rmax_abs) / 2.0f;
+                    int limit_dir_sign = (limit_dir == 0) ? 1 : -1;
+                    int dir_sign = (dir == 0) ? 1 : -1;
+                    center_positions[i] = current_pos + half_range * limit_dir_sign * dir_sign;
                 }
                 
-                printf("║  %2d    %8.4f   %8.4f   %8.4f      %s              ║\n",
-                       i + 1, current_pos, offset, center_positions[i],
-                       (g_CalibData.directions[i] == 0) ? "+" : "-");
+                printf("║  %2d    %8.4f   %8.4f     %2d   %2d        %d                    ║\n",
+                       i + 1, current_pos, center_positions[i], dir, limit_dir, negate);
             }
             
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 即将执行：                                                        ║\n");
             printf("║   1. 所有轴同时运动到中心点                                       ║\n");
-            printf("║   2. 切 IDLE（电机停稳）                                           ║\n");
-            printf("║   3. 逐轴 SDO 写 0x3801=5 置零                                   ║\n");
-            printf("║   4. 锁定零点（MOTION_CONTROL q=0）                                ║\n");
+            printf("║   2. 逐轴 SDO 写 0x3801=5 置零                                   ║\n");
+            printf("║   3. 锁定零点（MOTION_CONTROL q=0）                                ║\n");
             printf("╠══════════════════════════════════════════════════════════════════╣\n");
             printf("║ 按回车开始，或输入 cancel 取消: ");
             fflush(stdout);
@@ -3157,32 +3211,9 @@ static void* CmdThread(void*)
                     printf(
                       "╠══════════════════════════════════════════════════════════════════╣\n");
 
-                    /* ========== 阶段2: 切 IDLE，电机停稳 ========== */
+                    /* ========== 阶段2: 逐轴置零 (SDO 0x3801=5) ========== */
                     printf(
-                      "║ [阶段2] 切 IDLE 模式，电机保持力矩...                              ║\n");
-                    fflush(stdout);
-
-                    for (int i = 0; i < g_CalibData.total_joints; i++)
-                    {
-                        MotorCmd_ cmd{};
-                        cmd.motion_func = MOTION_IDLE;
-                        cmd.kp = 32.0f;
-                        cmd.kd = 30.0f;
-                        cmd.drive_mode = MT_GetGlobalDriveMode();
-                        cmd.direction = (EC_T_SBYTE)g_CalibData.directions[i];
-                        MT_SetMotorCmd((EC_T_WORD)i, &cmd);
-                    }
-
-                    OsSleep(500);
-                    printf(
-                      "║ [阶段2] 所有轴已切 IDLE，电机停稳                                 ║\n");
-                    fflush(stdout);
-
-                    /* ========== 阶段3: 逐轴置零 (SDO 0x3801=5) ========== */
-                    printf(
-                      "╠══════════════════════════════════════════════════════════════════╣\n");
-                    printf(
-                      "║ [阶段3] 逐轴设置零点 (SDO 0x3801=5)...                           ║\n");
+                      "║ [阶段2] 逐轴设置零点 (SDO 0x3801=5)...                           ║\n");
                     fflush(stdout);
 
                     int success_count = 0;
@@ -3207,11 +3238,11 @@ static void* CmdThread(void*)
                     // 等待所有驱动器完成归零处理
                     OsSleep(200);
 
-                    /* ========== 阶段4: MOTION_CONTROL q=0 锁住零点 ========== */
+                    /* ========== 阶段3: MOTION_CONTROL q=0 锁住零点 ========== */
                     printf(
                       "╠══════════════════════════════════════════════════════════════════╣\n");
                     printf(
-                      "║ [阶段4] 锁定零点位置...                                          ║\n");
+                      "║ [阶段3] 锁定零点位置...                                          ║\n");
                     fflush(stdout);
 
                     for (int i = 0; i < g_CalibData.total_joints; i++)
@@ -3235,7 +3266,7 @@ static void* CmdThread(void*)
                     }
                     OsSleep(500);
                     printf(
-                      "║ [阶段4] 所有电机已锁定在零点                                     ║\n");
+                      "║ [阶段3] 所有电机已锁定在零点                                     ║\n");
                     fflush(stdout);
 
                     // 验证：打印各轴当前位置，应该接近 0
@@ -3335,6 +3366,22 @@ static void* CmdThread(void*)
                 } else {
                     printf("[CMD] CST模式用法: set <axis> <tau>\n");
                 }
+            } else if ((EC_T_SBYTE)mode == (EC_T_SBYTE)DRIVE_MODE_MIT) {
+                // MIT模式: set <axis> <q> <dq> <tau> <kp> <kd>
+                float q, dq, tau, kp, kd;
+                if (sscanf(line + 4, "%*d %f %f %f %f %f", &q, &dq, &tau, &kp, &kd) == 5) {
+                    cmd.drive_mode = (EC_T_SBYTE)DRIVE_MODE_MIT;
+                    cmd.q   = q;
+                    cmd.dq  = dq;
+                    cmd.tau = tau;
+                    cmd.kp  = kp;
+                    cmd.kd  = kd;
+                    MT_SetMotorCmd((EC_T_WORD)(axis - 1), &cmd);
+                    printf("[CMD] OK: axis=%d [MIT] q=%.3f dq=%.3f tau=%.3f kp=%.1f kd=%.1f\n",
+                           axis, q, dq, tau, kp, kd);
+                } else {
+                    printf("[CMD] MIT模式用法: set <axis> <q> <dq> <tau> <kp> <kd>\n");
+                }
             }
             fflush(stdout);
             continue;
@@ -3351,10 +3398,13 @@ static void* CmdThread(void*)
                 if (MT_GetMotorState((EC_T_WORD)(axis - 1), &st))
                 {
                     printf("[CMD] --- Axis %d Feedback ---\n", axis);
-                    printf("  Mode: 0x%02X | Status: 0x%08X\n", st.mode, st.motorstate);
-                    printf("  Pos: %.6f rad | Vel: %.6f rad/s | Tau: %.3f N.m\n", 
+                    printf("  Mode: 0x%02X(%d) | Status: 0x%08X\n", st.mode, (int)(EC_T_SBYTE)st.mode, st.motorstate);
+                    printf("  Pos: %.6f rad | Vel: %.6f rad/s | Tau: %.3f N.m\n",
                            st.q_fb, st.dq_fb, st.tau_fb);
-                    printf("  Vol: %.1f V | Temp: MCU %.1f degC, Motor %.1f degC\n", 
+                    if ((EC_T_SBYTE)st.mode == (EC_T_SBYTE)DRIVE_MODE_MIT) {
+                        printf("  ExtTor(0x4020): %.3f N.m\n", st.tau_ext);
+                    }
+                    printf("  Vol: %.1f V | Temp: MCU %.1f degC, Motor %.1f degC\n",
                            st.vol, (float)st.temperature[0]*0.1f, (float)st.temperature[1]*0.1f);
                 }
                 else

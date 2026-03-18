@@ -528,11 +528,11 @@
 			<ProcessData>
 				<Send>
 					<BitStart>568</BitStart>
-					<BitLength>136</BitLength>
+					<BitLength>216</BitLength>
 				</Send>
 				<Recv>
-					<BitStart>800</BitStart>
-					<BitLength>152</BitLength>
+					<BitStart>880</BitStart>
+					<BitLength>200</BitLength>
 				</Recv>
 				<Sm2>
 					<Type>Outputs</Type>
@@ -593,27 +593,6 @@
 						<DataType>UINT</DataType>
 					</Entry>
 					<Entry>
-						<Index>#x6064</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>32</BitLen>
-						<Name>Position Actual Value</Name>
-						<DataType>DINT</DataType>
-					</Entry>
-					<Entry>
-						<Index>#x606c</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>32</BitLen>
-						<Name>Velocity Actual Value</Name>
-						<DataType>DINT</DataType>
-					</Entry>
-					<Entry>
-						<Index>#x6077</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>16</BitLen>
-						<Name>Torque Actual Value</Name>
-						<DataType>INT</DataType>
-					</Entry>
-					<Entry>
 						<Index>#x60f4</Index>
 						<SubIndex>0</SubIndex>
 						<BitLen>32</BitLen>
@@ -633,6 +612,34 @@
 						<BitLen>8</BitLen>
 						<Name>Mode of Operation Display</Name>
 						<DataType>SINT</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4007</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit ActualPos</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4008</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit ActualVel</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4009</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit ActualTor</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4020</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Torque Sensor Value</Name>
+						<DataType>REAL</DataType>
 					</Entry>
 				</TxPdo>
 				<TxPdo>
@@ -749,27 +756,6 @@
 						<DataType>UINT</DataType>
 					</Entry>
 					<Entry>
-						<Index>#x607a</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>32</BitLen>
-						<Name>Target Position</Name>
-						<DataType>DINT</DataType>
-					</Entry>
-					<Entry>
-						<Index>#x60ff</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>32</BitLen>
-						<Name>Target Velocity</Name>
-						<DataType>DINT</DataType>
-					</Entry>
-					<Entry>
-						<Index>#x6071</Index>
-						<SubIndex>0</SubIndex>
-						<BitLen>16</BitLen>
-						<Name>Target Torque</Name>
-						<DataType>INT</DataType>
-					</Entry>
-					<Entry>
 						<Index>#x60b1</Index>
 						<SubIndex>0</SubIndex>
 						<BitLen>32</BitLen>
@@ -782,6 +768,41 @@
 						<BitLen>8</BitLen>
 						<Name>Mode of Operation</Name>
 						<DataType>SINT</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4000</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit TargetPos</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4001</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit TargetVel</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4002</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit TargeTor</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4003</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit Kp</Name>
+						<DataType>REAL</DataType>
+					</Entry>
+					<Entry>
+						<Index>#x4004</Index>
+						<SubIndex>0</SubIndex>
+						<BitLen>32</BitLen>
+						<Name>Mit Kd</Name>
+						<DataType>REAL</DataType>
 					</Entry>
 				</RxPdo>
 				<RxPdo>
@@ -984,33 +1005,6 @@
 							<Ccs>1</Ccs>
 							<Index>6657</Index>
 							<SubIndex>2</SubIndex>
-							<Data>20006460</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>6657</Index>
-							<SubIndex>3</SubIndex>
-							<Data>20006c60</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>6657</Index>
-							<SubIndex>4</SubIndex>
-							<Data>10007760</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>6657</Index>
-							<SubIndex>5</SubIndex>
 							<Data>2000f460</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
@@ -1019,7 +1013,7 @@
 							<Timeout>0</Timeout>
 							<Ccs>1</Ccs>
 							<Index>6657</Index>
-							<SubIndex>6</SubIndex>
+							<SubIndex>3</SubIndex>
 							<Data>10003f60</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
@@ -1028,8 +1022,44 @@
 							<Timeout>0</Timeout>
 							<Ccs>1</Ccs>
 							<Index>6657</Index>
-							<SubIndex>7</SubIndex>
+							<SubIndex>4</SubIndex>
 							<Data>08006160</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>6657</Index>
+							<SubIndex>5</SubIndex>
+							<Data>20000740</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>6657</Index>
+							<SubIndex>6</SubIndex>
+							<Data>20000840</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>6657</Index>
+							<SubIndex>7</SubIndex>
+							<Data>20000940</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1A01 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>6657</Index>
+							<SubIndex>8</SubIndex>
+							<Data>20002040</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
 							<Transition>PS</Transition>
@@ -1038,7 +1068,7 @@
 							<Ccs>1</Ccs>
 							<Index>6657</Index>
 							<SubIndex>0</SubIndex>
-							<Data>07</Data>
+							<Data>08</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
 							<Transition>PS</Transition>
@@ -1236,33 +1266,6 @@
 							<Ccs>1</Ccs>
 							<Index>5633</Index>
 							<SubIndex>2</SubIndex>
-							<Data>20007a60</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>5633</Index>
-							<SubIndex>3</SubIndex>
-							<Data>2000ff60</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>5633</Index>
-							<SubIndex>4</SubIndex>
-							<Data>10007160</Data>
-						</InitCmd>
-						<InitCmd Fixed="true">
-							<Transition>PS</Transition>
-							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
-							<Timeout>0</Timeout>
-							<Ccs>1</Ccs>
-							<Index>5633</Index>
-							<SubIndex>5</SubIndex>
 							<Data>2000b160</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
@@ -1271,8 +1274,53 @@
 							<Timeout>0</Timeout>
 							<Ccs>1</Ccs>
 							<Index>5633</Index>
-							<SubIndex>6</SubIndex>
+							<SubIndex>3</SubIndex>
 							<Data>08006060</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>5633</Index>
+							<SubIndex>4</SubIndex>
+							<Data>20000040</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>5633</Index>
+							<SubIndex>5</SubIndex>
+							<Data>20000140</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>5633</Index>
+							<SubIndex>6</SubIndex>
+							<Data>20000240</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>5633</Index>
+							<SubIndex>7</SubIndex>
+							<Data>20000340</Data>
+						</InitCmd>
+						<InitCmd Fixed="true">
+							<Transition>PS</Transition>
+							<Comment><![CDATA[download pdo 0x1601 entry]]></Comment>
+							<Timeout>0</Timeout>
+							<Ccs>1</Ccs>
+							<Index>5633</Index>
+							<SubIndex>8</SubIndex>
+							<Data>20000440</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
 							<Transition>PS</Transition>
@@ -1281,7 +1329,7 @@
 							<Ccs>1</Ccs>
 							<Index>5633</Index>
 							<SubIndex>0</SubIndex>
-							<Data>06</Data>
+							<Data>08</Data>
 						</InitCmd>
 						<InitCmd Fixed="true">
 							<Transition>PS</Transition>
@@ -1771,7 +1819,7 @@
 					<Cmd>5</Cmd>
 					<Adp>1002</Adp>
 					<Ado>2064</Ado>
-					<Data>0011110024000100</Data>
+					<Data>00111b0024000100</Data>
 					<Cnt>1</Cnt>
 					<Retries>3</Retries>
 				</InitCmd>
@@ -1781,7 +1829,7 @@
 					<Cmd>5</Cmd>
 					<Adp>1002</Adp>
 					<Ado>2072</Ado>
-					<Data>0014130020000100</Data>
+					<Data>0014190020000100</Data>
 					<Cnt>1</Cnt>
 					<Retries>3</Retries>
 				</InitCmd>
@@ -1791,7 +1839,7 @@
 					<Cmd>5</Cmd>
 					<Adp>1002</Adp>
 					<Ado>1536</Ado>
-					<Data>00000001110000070011000201000000</Data>
+					<Data>000000011b0000070011000201000000</Data>
 					<Cnt>1</Cnt>
 					<Retries>3</Retries>
 				</InitCmd>
@@ -1801,7 +1849,7 @@
 					<Cmd>5</Cmd>
 					<Adp>1002</Adp>
 					<Ado>1552</Ado>
-					<Data>00080001130000070014000101000000</Data>
+					<Data>00080001190000070014000101000000</Data>
 					<Cnt>1</Cnt>
 					<Retries>3</Retries>
 				</InitCmd>
@@ -2476,7 +2524,7 @@
 					<Comment><![CDATA[cyclic cmd]]></Comment>
 					<Cmd>11</Cmd>
 					<Addr>16777216</Addr>
-					<DataLength>17</DataLength>
+					<DataLength>27</DataLength>
 					<Cnt>1</Cnt>
 					<InputOffs>61</InputOffs>
 					<OutputOffs>61</OutputOffs>
@@ -2487,10 +2535,10 @@
 					<Comment><![CDATA[cyclic cmd]]></Comment>
 					<Cmd>10</Cmd>
 					<Addr>16779264</Addr>
-					<DataLength>19</DataLength>
+					<DataLength>25</DataLength>
 					<Cnt>1</Cnt>
-					<InputOffs>90</InputOffs>
-					<OutputOffs>90</OutputOffs>
+					<InputOffs>100</InputOffs>
+					<OutputOffs>100</OutputOffs>
 				</Cmd>
 				<Cmd>
 					<State>PREOP</State>
@@ -2502,8 +2550,8 @@
 					<Ado>304</Ado>
 					<DataLength>2</DataLength>
 					<Cnt>3</Cnt>
-					<InputOffs>121</InputOffs>
-					<OutputOffs>121</OutputOffs>
+					<InputOffs>137</InputOffs>
+					<OutputOffs>137</OutputOffs>
 				</Cmd>
 			</Frame>
 		</Cyclic>
@@ -2513,24 +2561,6 @@
 				<Variable>
 					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Statusword</Name>
 					<DataType>UINT</DataType>
-					<BitSize>16</BitSize>
-					<BitOffs>800</BitOffs>
-				</Variable>
-				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Position Actual Value</Name>
-					<DataType>DINT</DataType>
-					<BitSize>32</BitSize>
-					<BitOffs>816</BitOffs>
-				</Variable>
-				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Velocity Actual Value</Name>
-					<DataType>DINT</DataType>
-					<BitSize>32</BitSize>
-					<BitOffs>848</BitOffs>
-				</Variable>
-				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Torque Actual Value</Name>
-					<DataType>INT</DataType>
 					<BitSize>16</BitSize>
 					<BitOffs>880</BitOffs>
 				</Variable>
@@ -2551,6 +2581,30 @@
 					<DataType>SINT</DataType>
 					<BitSize>8</BitSize>
 					<BitOffs>944</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Mit ActualPos</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>952</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Mit ActualVel</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>984</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Mit ActualTor</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>1016</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Transmit PDO mapping.Torque Sensor Value</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>1048</BitOffs>
 				</Variable>
 				<Variable>
 					<Name>Inputs.Frm0State</Name>
@@ -2820,34 +2874,46 @@
 					<BitOffs>568</BitOffs>
 				</Variable>
 				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Target Position</Name>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Velocity Offset</Name>
 					<DataType>DINT</DataType>
 					<BitSize>32</BitSize>
 					<BitOffs>584</BitOffs>
 				</Variable>
 				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Target Velocity</Name>
-					<DataType>DINT</DataType>
-					<BitSize>32</BitSize>
-					<BitOffs>616</BitOffs>
-				</Variable>
-				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Target Torque</Name>
-					<DataType>INT</DataType>
-					<BitSize>16</BitSize>
-					<BitOffs>648</BitOffs>
-				</Variable>
-				<Variable>
-					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Velocity Offset</Name>
-					<DataType>DINT</DataType>
-					<BitSize>32</BitSize>
-					<BitOffs>664</BitOffs>
-				</Variable>
-				<Variable>
 					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mode of Operation</Name>
 					<DataType>SINT</DataType>
 					<BitSize>8</BitSize>
-					<BitOffs>696</BitOffs>
+					<BitOffs>616</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mit TargetPos</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>624</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mit TargetVel</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>656</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mit TargeTor</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>688</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mit Kp</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>720</BitOffs>
+				</Variable>
+				<Variable>
+					<Name>Drive 2 (TC600E TR CoE Drive).2nd Receive PDO mapping.Mit Kd</Name>
+					<DataType>REAL</DataType>
+					<BitSize>32</BitSize>
+					<BitOffs>752</BitOffs>
 				</Variable>
 				<Variable>
 					<Name>Outputs.Frm0Ctrl</Name>

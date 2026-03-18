@@ -33,8 +33,10 @@
 #include <stdint.h>  /* [2026-01-28] DDS 数据结构需要 uint8_t, uint32_t 等类型 */
 
 /* [2026-01-23] 驱动器控制模式（写入 0x6060）*/
+/* 注意：DRIVE_MODE_MIT = -6，必须以有符号字节写入 0x6060，不能用无符号 250 */
 typedef enum _DriveMode
 {
+    DRIVE_MODE_MIT = -6,  /* MIT 模式（驱动器内 PD + 前馈）: 0x6060 = -6 (有符号) */
     DRIVE_MODE_PT  = 4,   /* Profile Torque - 扭矩/阻抗控制 */
     DRIVE_MODE_CSP = 8,   /* Cyclic Sync Position - 位置控制 */
     DRIVE_MODE_CST = 10,  /* Cyclic Sync Torque - 纯力矩控制 */
@@ -159,7 +161,7 @@ typedef struct _DDS_LowState
 /* [2026-01-23] 重构：分离驱动模式和运动功能 */
 typedef struct _MotorCmd_
 {
-    EC_T_BYTE  drive_mode;   /* 驱动器模式: DRIVE_MODE_PT/CSP/CST */
+    EC_T_SBYTE drive_mode;   /* 驱动器模式: DRIVE_MODE_MIT(-6)/PT(4)/CSP(8)/CST(10)；必须有符号，MIT=-6 */
     EC_T_BYTE  motion_func;  /* 运动功能: MOTION_IDLE/HOME/AGING/CONTROL/SHUTDOWN */
     EC_T_SBYTE direction;    /* 方向: 0=正向, -1=反向（用于PT模式扭矩反转）*/
     EC_T_REAL  q;            /* 目标位置 (rad) -> 0x607A */
@@ -175,10 +177,11 @@ typedef struct _MotorCmd_
 typedef struct _MotorState_
 {
     EC_T_BYTE  mode;              /* 电机当前模式 0x6061 */
-    EC_T_REAL  q_fb;              /* 关节反馈位置 (rad) -> 0x6064 */
-    EC_T_REAL  dq_fb;             /* 关节反馈速度 (rad/s) -> 0x606C */
+    EC_T_REAL  q_fb;              /* 关节反馈位置 (rad) -> MIT:0x4007 / 其他:0x6064 */
+    EC_T_REAL  dq_fb;             /* 关节反馈速度 (rad/s) -> MIT:0x4008 / 其他:0x606C */
     EC_T_REAL  ddq_fb;            /* 关节反馈加速度 (需差分计算) */
-    EC_T_REAL  tau_fb;            /* 关节反馈力矩 (N.m) -> 0x6077 */
+    EC_T_REAL  tau_fb;            /* 关节反馈力矩 (N.m) -> MIT:0x4009 / 其他:0x6077 */
+    EC_T_REAL  tau_ext;           /* [MIT] 外置力矩传感器值 (N.m) -> 0x4020；非MIT模式置0 */
     EC_T_WORD  temperature[2];    /* [0]:MCU温度 0x3008, [1]:电机温度 0x3009 */
     EC_T_REAL  vol;               /* 母线电压 (V) -> 0x300B */
     EC_T_DWORD sensor[2];         /* 预留传感器数据 */
@@ -260,6 +263,19 @@ typedef struct _MotorState_
 #define DRV_OBJ_DC_LINK_VOLTAGE             0x300B
 #define DRV_OBJ_GEAR_RATIO                  0x3D06  /* PrD.06 减速比 索引 0x3D06*/
 
+
+/* MIT 模式对象（0x40xx 系列，每台从站独立，不加 OBJOFFSET）
+ * RxPDO（主站→驱动器）: 0x4000~0x4004
+ * TxPDO（驱动器→主站）: 0x4007~0x4009, 0x4020 */
+#define DRV_OBJ_MIT_TARGET_POS    0x4000  /* MIT 期望位置 (float, rad) */
+#define DRV_OBJ_MIT_TARGET_VEL    0x4001  /* MIT 期望速度 (float, rad/s) */
+#define DRV_OBJ_MIT_TARGET_TOR    0x4002  /* MIT 前馈力矩 (float, N·m) */
+#define DRV_OBJ_MIT_KP            0x4003  /* MIT 刚度 (float) */
+#define DRV_OBJ_MIT_KD            0x4004  /* MIT 阻尼 (float) */
+#define DRV_OBJ_MIT_ACTUAL_POS    0x4007  /* MIT 实际位置反馈 (float, rad) */
+#define DRV_OBJ_MIT_ACTUAL_VEL    0x4008  /* MIT 实际速度反馈 (float, rad/s) */
+#define DRV_OBJ_MIT_ACTUAL_TOR    0x4009  /* MIT 实际力矩反馈 (float, N·m) */
+#define DRV_OBJ_MIT_EXT_TOR       0x4020  /* MIT 外置力矩传感器值 (float, N·m) */
 
 #define DRV_OBJ_DIGITAL_INPUT               0x6000
 #define DRV_OBJ_DIGITAL_INPUT_SUBINDEX_1    0x1
@@ -464,6 +480,17 @@ typedef struct _Motor_Type
 	EC_T_SWORD* psTempMotor;          /* 0x3009: 电机温度（示例） */
 	EC_T_SWORD* psTempIgbt;           /* 0x300F: IGBT 温度（示例） */
 	EC_T_WORD*  pwDcLinkVoltage;      /* 0x300B: 母线电压（示例，很多驱动是 uint16/0.1V） */
+
+	/*-MIT 模式 PDO 指针（0x40xx 系列，每台从站独立，仅当 ENI 映射时非 EC_NULL）--------*/
+	EC_T_REAL*  pfMitTargetPos;   /* 0x4000: MIT 期望位置 RxPDO (float, rad) */
+	EC_T_REAL*  pfMitTargetVel;   /* 0x4001: MIT 期望速度 RxPDO (float, rad/s) */
+	EC_T_REAL*  pfMitTargetTor;   /* 0x4002: MIT 前馈力矩 RxPDO (float, N·m) */
+	EC_T_REAL*  pfMitKp;          /* 0x4003: MIT 刚度 RxPDO (float) */
+	EC_T_REAL*  pfMitKd;          /* 0x4004: MIT 阻尼 RxPDO (float) */
+	EC_T_REAL*  pfMitActualPos;   /* 0x4007: MIT 实际位置 TxPDO (float, rad) */
+	EC_T_REAL*  pfMitActualVel;   /* 0x4008: MIT 实际速度 TxPDO (float, rad/s) */
+	EC_T_REAL*  pfMitActualTor;   /* 0x4009: MIT 实际力矩 TxPDO (float, N·m) */
+	EC_T_REAL*  pfMitExtTor;      /* 0x4020: MIT 外置力矩传感器 TxPDO (float, N·m) */
 
 	/*-单位换算（rad <-> PUU）---------------------------------------------------*/
 	/* [2026-01-13] 作用：把上层 rad/rad/s 与驱动对象的 PUU(count)/PUU/s 对齐 */

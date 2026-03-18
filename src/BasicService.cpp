@@ -12,6 +12,7 @@
 //[2026-01-16] 目的：不再用 EcLogMsg/EcDemoLogMsg使用BasicService的日志系统，而是使用tinylog
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 /* 供 on_terminate 使用：Ctrl+C 时置 bRun=false 并 join，避免静态析构时 std::thread 仍 joinable 导致 terminate */
 static std::thread s_demo_thread;
@@ -26,7 +27,8 @@ BasicService::~BasicService()
     // todo
 }
 
-// [2026-01-16] 目的：将 EC-Master 的日志回调映射到 tiny_framework 日志系统
+// [2026-01-16] 将 EC-Master 日志直接打到 stderr，简短无前缀、无颜色；fflush 减少与 stdout 多线程交错
+// 过滤轴状态刷屏：Axis[N] To xxx / Position Sync（仍保留错误、Master state 等）
 static EC_T_DWORD EC_FNCALL EcMasterLogToTiny(struct _EC_T_LOG_CONTEXT*, EC_T_DWORD, const EC_T_CHAR* fmt, ...)
 {
     char buf[1024];
@@ -34,9 +36,10 @@ static EC_T_DWORD EC_FNCALL EcMasterLogToTiny(struct _EC_T_LOG_CONTEXT*, EC_T_DW
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-
-    // 统一用 LOG_I 输出，保证日志系统一致
-    LOG_I(BasicService) << buf;
+    if (strstr(buf, "Axis[") && (strstr(buf, " To ") || strstr(buf, "Position Sync")))
+        return EC_E_NOERROR;
+    fputs(buf, stderr);
+    fflush(stderr);
     return EC_E_NOERROR;
 }
 
@@ -196,15 +199,6 @@ bool BasicService::initialize(const std::string& busi_config)
         LOG_COUT(BasicService) << "ethercat_demo config load failed: " << e.what();
         return false;
     }
-
-    // 【注意】需要app.yaml中daemon设置为true时，添加定时器才生效
-    // 这里count需要声明为static，否则post_timer_event结束后，函数退出，count因退出作用域而会被销毁
-    static uint32_t count = 0;
-    event_loop_.post_timer_event(
-    "timer_test",
-    [&]() { LOG_I(BasicService) << "timer_test, count: " << ++count; },
-    std::chrono::seconds(1),
-    5);
 
     LOG_I(BasicService) << app_name() << "_" << app_version() << "(" << app_buildtime()
                    << ") already initialized.";
