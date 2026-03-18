@@ -20,40 +20,25 @@
 
 下游逻辑（如 DDS 命令处理）会：按内部轴号 0～MotorCount-1 循环，用 `MotorToDdsIndex(i)` 得到 DDS 索引，从 LowCmd 取该索引的命令下发到轴 `i`；读回时用 `MT_GetMotorState(i)` 填到 LowState 的对应索引。
 
-### 1.2 配置来源（二选一）
+### 1.2 配置来源
 
-- **来自 cfg.json**（推荐）：业务配置里 `motor_map_from_cfg: true` 时，从 **cfg.json** 的 `motor_map` 字段读取；与标定文件同一文件，便于一致。
-- **来自 busi.yaml**：`motor_map_from_cfg: false` 时，从 **busi.yaml** 的 `ethercat_demo.motor_map` 读取。
+- **motor_map 只在 cfg.json 里配置**，且**不单独读顶层**：从 **cfg.json** 的 `actuators.joints` 里，按每个关节的 `motor_map` 字段（true 表示该关节参与控制）汇总出电机列表与 DDS 索引；站地址按顺序 1002、1003、… 分配。
+- **busi.yaml** 的 `ethercat_demo.motor_map` 仅当 `motor_map_from_cfg: false` 时作为备用。
 
 另一程序只需实现其中一种（或两种都支持），并保证解析结果一致（见下）。
 
 ### 1.3 两种格式与解析结果
 
-**格式 A：cfg.json 中 28 个 bool（当前推荐）**
+**格式 A：cfg.json 的 actuators.joints（当前使用）**
 
-- 位置：`cfg.json` 根节点下的 `"motor_map"`。
-- 类型：长度为 28 的 bool 数组，下标即 **DDS 索引**（0～27）。
-- 含义：`true` 表示该 DDS 索引对应一个 EtherCAT 电机；`false` 表示不对应。
-- 站地址约定：按 DDS 索引顺序，第 1 个 `true` 对应站地址 1002，第 2 个 1003，依次递增。
+- 位置：`cfg.json` 的 **actuators.joints**，每个关节有 **motor_map** 字段（true/false）。
+- 含义：`motor_map: true` 表示该关节参与控制（有电机）；不单独读顶层 motor_map。
+- 站地址约定：按关节顺序，第 1 个 `motor_map: true` 对应站地址 1002，第 2 个 1003，依次递增。
+- 解析：遍历 `actuators.joints`，若 `joint.motor_map == true`，则 `dds_indices.append(joint.index - 1)`（0-based），`slave_addrs.append(next_addr++)`。得到电机数量与轴↔DDS 映射。
 
-解析逻辑（伪代码）：
+**格式 B：busi.yaml 列表格式（备用）**
 
-```text
-dds_indices = []
-slave_addrs = []
-next_addr = 1002
-for i in 0..27:
-  if motor_map[i] == true:
-    dds_indices.append(i)
-    slave_addrs.append(next_addr)
-    next_addr += 1
-```
-
-得到：电机数量 `count = len(dds_indices)`，内部轴 `j` 对应 DDS 索引 `dds_indices[j]`、站地址 `slave_addrs[j]`。
-
-**格式 B：busi.yaml / 列表格式**
-
-- 位置：`busi.yaml` 中 `ethercat_demo.motor_map`，或 cfg.json 中 `motor_map` 为对象数组时。
+- 位置：`busi.yaml` 中 `ethercat_demo.motor_map`（仅当 `motor_map_from_cfg: false` 时使用）。
 - 每项：`slave_addr`（ENI 中该电机的站地址）、`dds_index`（DDS 索引，0～27）。
 - 数组顺序即内部轴顺序：第 0 项对应内部轴 0，第 1 项对应内部轴 1，……
 
@@ -69,10 +54,12 @@ for i in 0..27:
 
 本工程中对应接口：`EcDemo_SetMotorConfig(slave_addrs, dds_indices, count, calib_path)` 会设置 `g_MotorCount`、`g_MotorSlaveAddr`、`g_MotorDdsIndex`，并调用 `MT_SetMotorMap(dds_indices, count)`；`myAppPrepare()` 中根据 `g_MotorCount` 填 `My_Slave[]`；`MT_Prepare()` 再根据 ENI 与 My_Slave 计算实际在线的 MotorCount。
 
+**cfg.json 中每关节的 motor_map 字段**：表示**是否有这台电机**（该关节是否参与控制）；**不是**“是否 EtherCAT”。`bus_type` 才表示 can/ethercat。程序只从 `actuators.joints` 汇总 motor_map，不单独读顶层。
+
 ### 1.5 修改 motor_map 的注意点
 
-- 增加电机：在 cfg.json 的 28 个 bool 中多设几个 `true`，或在 busi 列表里增加 `{ slave_addr, dds_index }`；ENI 中必须有对应站地址的从站，且 PDO 一致。
-- 减少电机：把对应位置改为 `false` 或从列表删除；保证 ENI 中仍存在的从站与 motor_map 一致，避免轴号错位。
+- 增加电机：在 cfg.json 的 **actuators.joints** 里把对应关节的 **motor_map** 设为 **true**；或在 busi 列表里增加 `{ slave_addr, dds_index }`（备用）。ENI 中必须有对应站地址的从站，且 PDO 一致。
+- 减少电机：把该关节的 motor_map 改为 **false**；保证 ENI 与 motor_map 一致，避免轴号错位。
 - 修改后需重启或重新加载配置，使 MotorCount 与映射关系更新。
 
 ---

@@ -15,10 +15,10 @@ ethercat_demo:
   cycle_us: 1000
   # 运行时长（毫秒），0=无限
   duration_ms: 0
-  # true = 从 cfg.json 读 motor_map（只读一个文件）；false = 从本文件 ethercat_demo.motor_map 读
+  # motor_map 只在 cfg.json 里配置；true = 从 cfg.json 读 motor_map，false = 从本文件 ethercat_demo.motor_map 读（备用）
   motor_map_from_cfg: true
 
-  # [2026-03-16] 电机映射表（仅当 motor_map_from_cfg 为 false 时使用）
+  # [2026-03-16] 电机映射表（仅当 motor_map_from_cfg 为 false 时使用，平时改 cfg.json 即可）
   # 每项：slave_addr = ENI 中该电机的 PhysAddr（站地址）
   #        dds_index  = 对应全身第几号电机（DDS motor_state/motor_cmd 的数组索引，从0开始）
   # 全身28个电机: dds_index 0~27

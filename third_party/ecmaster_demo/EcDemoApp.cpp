@@ -2707,21 +2707,6 @@ static void* CmdThread(void*)
                         json << "{\n";
                         json << "  \"machine_name\": \"scout-w1\",\n";
                         json << "  \"dof\": " << TOTAL_DOF << ",\n";
-                        // motor_map: 28 个 bool，true 表示该 DDS 索引为 EtherCAT 电机（与上面 bool motor_map[TOTAL_DOF] 一致，直接生成 JSON）
-                        {
-                            bool motor_map_bool[TOTAL_DOF] = { false };
-                            for (int i = 0; i < g_MotorCount && i < TOTAL_DOF; i++) {
-                                int dds = g_MotorDdsIndex[i];
-                                if (dds >= 0 && dds < TOTAL_DOF)
-                                    motor_map_bool[dds] = true;
-                            }
-                            json << "  \"motor_map\": [";
-                            for (int i = 0; i < TOTAL_DOF; i++) {
-                                json << (motor_map_bool[i] ? "true" : "false");
-                                if (i < TOTAL_DOF - 1) json << ", ";
-                            }
-                            json << "],\n";
-                        }
                         json << "  \"actuators\": {\n";
                         json << "    \"celebration_state\": false,\n";
                         json << "    \"timestamp\": " << now << ",\n";
@@ -2736,6 +2721,10 @@ static void* CmdThread(void*)
                             const char* bus_type = (i >= 14 && i <= 27) ? "ethercat" : "can";
                             const char* motor_type = (i < 8) ? "步科" : "同川";
                             const char* motor_mode = (i < 8) ? ((i < 4) ? "CSP" : "CSV") : "MIT";
+                            // motor_map（每关节）：是否有这台电机（是否在你填写的 motor_map 里），不是“是否 EtherCAT”
+                            bool in_motor_map = false;
+                            for (int j = 0; j < g_MotorCount; j++)
+                                if (g_MotorDdsIndex[j] == (int)i) { in_motor_map = true; break; }
 
                             json << "      {\n";
                             json << "        \"index\": " << dds_index << ",\n";
@@ -2743,6 +2732,7 @@ static void* CmdThread(void*)
                             json << "        \"bus_type\": \"" << bus_type << "\",\n";
                             json << "        \"motor_type\": \"" << motor_type << "\",\n";
                             json << "        \"motor_mode\": \"" << motor_mode << "\",\n";
+                            json << "        \"motor_map\": " << (in_motor_map ? "true" : "false") << ",\n";
                             json << "        \"position\": " << positions[i] << ",\n";
                             json << "        \"direction\": " << directions[i] << ",\n";
                             json << "        \"negate\": "

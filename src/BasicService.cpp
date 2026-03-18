@@ -67,27 +67,18 @@ static bool StartEcMasterDemo(const YAML::Node& busi_config)
     std::vector<EC_T_WORD> slave_addrs;
     std::vector<int> dds_indices;
     if (motor_map_from_cfg) {
-        // 从 cfg.json 读 motor_map（只读一个文件，与 yaml 无关）
+        // 从 cfg.json 的 actuators.joints 读 motor_map（每关节 motor_map 为 true 的即参与控制的电机，不单独读顶层）
         try {
             YAML::Node cfg = YAML::LoadFile(calib_path);
-            YAML::Node ma = cfg["motor_map"];
-            if (ma && ma.IsSequence()) {
-                if (ma.size() >= 28 && !ma[0].IsMap()) {
-                    // 格式：28 个 bool 数组，true 表示该 DDS 索引为 EtherCAT 电机，站地址按顺序 1002, 1003, ...
-                    EC_T_WORD next_addr = 1002;
-                    for (size_t i = 0; i < ma.size() && i < 28; i++) {
-                        if (ma[i].as<bool>(false)) {
-                            dds_indices.push_back(static_cast<int>(i));
-                            slave_addrs.push_back(next_addr++);
-                        }
-                    }
-                } else {
-                    // 旧格式：[{ "slave_addr": 1002, "dds_index": 14 }, ...]
-                    for (const auto& node : ma) {
-                        if (node["slave_addr"] && node["dds_index"]) {
-                            slave_addrs.push_back(static_cast<EC_T_WORD>(node["slave_addr"].as<int>()));
-                            dds_indices.push_back(node["dds_index"].as<int>());
-                        }
+            YAML::Node joints = cfg["actuators"]["joints"];
+            if (joints && joints.IsSequence()) {
+                EC_T_WORD next_addr = 1002;
+                for (size_t i = 0; i < joints.size(); i++) {
+                    const YAML::Node& j = joints[i];
+                    if (j["motor_map"].as<bool>(false)) {
+                        int idx = j["index"].as<int>(static_cast<int>(i + 1));
+                        dds_indices.push_back(idx - 1);  // DDS 索引 0-based
+                        slave_addrs.push_back(next_addr++);
                     }
                 }
             }
