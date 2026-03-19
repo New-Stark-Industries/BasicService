@@ -66,27 +66,57 @@ static bool StartEcMasterDemo(const YAML::Node& busi_config)
     std::string calib_path = eni_path.substr(0, eni_path.rfind('/') + 1) + "cfg.json";
     std::vector<EC_T_WORD> slave_addrs;
     std::vector<int> dds_indices;
+    EC_T_WORD first_slave_addr = 1001;
+    std::vector<EC_T_WORD> bridge_slave_addrs;
+    try {
+        YAML::Node cfg = YAML::LoadFile(calib_path);
+        if (cfg["ethercat"]) {
+            if (cfg["ethercat"]["first_slave_addr"])
+                first_slave_addr = static_cast<EC_T_WORD>(cfg["ethercat"]["first_slave_addr"].as<int>(1001));
+            if (cfg["ethercat"]["bridge_slave_addrs"] && cfg["ethercat"]["bridge_slave_addrs"].IsSequence()) {
+                for (size_t i = 0; i < cfg["ethercat"]["bridge_slave_addrs"].size(); i++)
+                    bridge_slave_addrs.push_back(static_cast<EC_T_WORD>(cfg["ethercat"]["bridge_slave_addrs"][i].as<int>()));
+            } else if (cfg["ethercat"]["bridge_slave_addr"]) {
+                bridge_slave_addrs.push_back(static_cast<EC_T_WORD>(cfg["ethercat"]["bridge_slave_addr"].as<int>(1001)));
+            }
+            if (bridge_slave_addrs.empty())
+                bridge_slave_addrs.push_back(1001);
+        } else {
+            bridge_slave_addrs.push_back(1001);
+        }
+    } catch (const std::exception&) {
+        bridge_slave_addrs.push_back(1001);
+    }
+    auto is_bridge = [&bridge_slave_addrs](EC_T_WORD addr) {
+        for (EC_T_WORD b : bridge_slave_addrs) if (b == addr) return true;
+        return false;
+    };
     if (motor_map_from_cfg) {
-        // 从 cfg.json 的 actuators.joints 读 motor_map（每关节 motor_map 为 true 的即参与控制的电机，不单独读顶层）
+        // 仅对 ethercat 关节：slave_addr!=0 表示有从站，加入电机列表；CAN 关节不处理
         try {
             YAML::Node cfg = YAML::LoadFile(calib_path);
             YAML::Node joints = cfg["actuators"]["joints"];
             if (joints && joints.IsSequence()) {
-                EC_T_WORD next_addr = 1002;
                 for (size_t i = 0; i < joints.size(); i++) {
                     const YAML::Node& j = joints[i];
-                    if (j["motor_map"].as<bool>(false)) {
-                        int idx = j["index"].as<int>(static_cast<int>(i + 1));
-                        dds_indices.push_back(idx - 1);  // DDS 索引 0-based
-                        slave_addrs.push_back(next_addr++);
-                    }
+                    std::string bt = j["bus_type"] ? j["bus_type"].as<std::string>("") : "";
+                    if (bt != "ethercat")
+                        continue;
+                    EC_T_WORD addr = j["slave_addr"] ? static_cast<EC_T_WORD>(j["slave_addr"].as<int>()) : 0;
+                    if (addr == 0)
+                        continue;
+                    int idx = j["index"].as<int>(static_cast<int>(i + 1));
+                    dds_indices.push_back(idx - 1);
+                    slave_addrs.push_back(addr);
                 }
             }
         } catch (const std::exception&) { }
     }
     if (slave_addrs.empty() && busi_config["ethercat_demo"]["motor_map"]) {
         for (const auto& node : busi_config["ethercat_demo"]["motor_map"]) {
-            slave_addrs.push_back(static_cast<EC_T_WORD>(node["slave_addr"].as<int>()));
+            EC_T_WORD addr = static_cast<EC_T_WORD>(node["slave_addr"].as<int>());
+            if (is_bridge(addr)) continue;
+            slave_addrs.push_back(addr);
             dds_indices.push_back(node["dds_index"].as<int>());
         }
     }
@@ -94,7 +124,9 @@ static bool StartEcMasterDemo(const YAML::Node& busi_config)
         EcDemo_SetMotorConfig(slave_addrs.data(), dds_indices.data(),
                               static_cast<int>(slave_addrs.size()),
                               calib_path.c_str());
-        LOG_I(BasicService) << "motor_map: " << slave_addrs.size() << " motors"
+        LOG_I(BasicService) << "ethercat: first=" << first_slave_addr
+            << ", bridges=" << bridge_slave_addrs.size()
+            << ", motors=" << slave_addrs.size()
             << (motor_map_from_cfg ? " (from cfg.json)" : " (from busi.yaml)") << ", calib: " << calib_path;
     }
 

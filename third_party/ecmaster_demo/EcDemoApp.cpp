@@ -2583,15 +2583,25 @@ static void* CmdThread(void*)
                         // 22-28: 右臂关节
                         "arm_j1_r", "arm_j2_r", "arm_j3_r", "arm_j4_r", "arm_j5_r", "arm_j6_r", "arm_j7_r"
                     };
-                    
+
                     bool motor_map[TOTAL_DOF] = {
-                        false, false, false, false, // 1-4: 转向
-                        false, false, false, false, // 5-8: 车轮
-                        false, false, false,        // 9-11: 腰部
-                        false,                      // 12: 躯干
-                        false, false,               // 13-14: 头部
+                        false, false, false, false,                      // 1-4: 转向
+                        false, false, false, false,                      // 5-8: 车轮
+                        false, false, false,                             // 9-11: 腰部
+                        false,                                           // 12: 躯干
+                        false, false,                                    // 13-14: 头部
                         false, false, false, false, false, false, false, // 15-21: 左臂
-                        false, false, false, false, false, false, false  // 22-28: 右臂
+                        true,  true,  true,  true,  true,  true,  true   // 22-28: 右臂
+                    };
+
+                    const int slave_addr[TOTAL_DOF] = {
+                        0,    0,    0,    0,                     // 1-4: 转向
+                        0,    0,    0,    0,                     // 5-8: 车轮
+                        0,    0,    0,                           // 9-11: 腰部
+                        0,                                       // 12: 躯干
+                        0,    0,                                 // 13-14: 头部
+                        0,    0,    0,    0,    0,    0,    0,   // 15-21: 左臂
+                        1002, 1003, 1004, 1005, 1006, 1007, 1008 // 22-28: 右臂
                     };
 
                     // 只有 15-21 号关节（索引 14-20）有有效参数，其他为 0
@@ -2716,15 +2726,13 @@ static void* CmdThread(void*)
                         for (int i = 0; i < TOTAL_DOF; i++) {
                             // DDS 索引从 1 开始
                             int dds_index = i + 1;
-                            
-                            // 确定 bus_type、motor_type、motor_mode（步科: 转向CSP/车轮CSV，同川: MIT）
-                            const char* bus_type = (i >= 14 && i <= 27) ? "ethercat" : "can";
+
+                            // 确定 bus_type、motor_type、motor_mode（同川 ethercat，步科 can）
                             const char* motor_type = (i < 8) ? "步科" : "同川";
+                            const char* bus_type = (i < 8) ? "can" : "ethercat";
                             const char* motor_mode = (i < 8) ? ((i < 4) ? "CSP" : "CSV") : "MIT";
-                            // motor_map（每关节）：是否有这台电机（是否在你填写的 motor_map 里），不是“是否 EtherCAT”
-                            bool in_motor_map = false;
-                            for (int j = 0; j < g_MotorCount; j++)
-                                if (g_MotorDdsIndex[j] == (int)i) { in_motor_map = true; break; }
+                            // 仅 ethercat 有从站：slave_addr!=0 即参与电机列表；motor_map 由 slave_addr 推导，兼容旧逻辑
+                            bool has_slave = (i >= 8 && slave_addr[i] != 0);
 
                             json << "      {\n";
                             json << "        \"index\": " << dds_index << ",\n";
@@ -2732,7 +2740,9 @@ static void* CmdThread(void*)
                             json << "        \"bus_type\": \"" << bus_type << "\",\n";
                             json << "        \"motor_type\": \"" << motor_type << "\",\n";
                             json << "        \"motor_mode\": \"" << motor_mode << "\",\n";
-                            json << "        \"motor_map\": " << (in_motor_map ? "true" : "false") << ",\n";
+                            json << "        \"motor_map\": " << (has_slave ? "true" : "false") << ",\n";
+                            if (i >= 8)
+                                json << "        \"slave_addr\": " << slave_addr[i] << ",\n";
                             json << "        \"position\": " << positions[i] << ",\n";
                             json << "        \"direction\": " << directions[i] << ",\n";
                             json << "        \"negate\": "
