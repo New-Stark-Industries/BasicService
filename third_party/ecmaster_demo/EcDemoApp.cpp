@@ -2731,16 +2731,12 @@ static void* CmdThread(void*)
                             const char* motor_type = (i < 8) ? "步科" : "同川";
                             const char* bus_type = (i < 8) ? "can" : "ethercat";
                             const char* motor_mode = (i < 8) ? ((i < 4) ? "CSP" : "CSV") : "MIT";
-                            // 仅 ethercat 有从站：slave_addr!=0 即参与电机列表；motor_map 由 slave_addr 推导，兼容旧逻辑
-                            bool has_slave = (i >= 8 && slave_addr[i] != 0);
-
                             json << "      {\n";
                             json << "        \"index\": " << dds_index << ",\n";
                             json << "        \"name\": \"" << all_joint_names[i] << "\",\n";
                             json << "        \"bus_type\": \"" << bus_type << "\",\n";
                             json << "        \"motor_type\": \"" << motor_type << "\",\n";
                             json << "        \"motor_mode\": \"" << motor_mode << "\",\n";
-                            json << "        \"motor_map\": " << (has_slave ? "true" : "false") << ",\n";
                             if (i >= 8)
                                 json << "        \"slave_addr\": " << slave_addr[i] << ",\n";
                             json << "        \"position\": " << positions[i] << ",\n";

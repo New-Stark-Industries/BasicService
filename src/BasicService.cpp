@@ -39,6 +39,9 @@ static EC_T_DWORD EC_FNCALL EcMasterLogToTiny(struct _EC_T_LOG_CONTEXT*, EC_T_DW
     if (strstr(buf, "Axis[") && (strstr(buf, " To ") || strstr(buf, "Position Sync")))
         return EC_E_NOERROR;
     fputs(buf, stderr);
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] != '\n')
+        fputc('\n', stderr);
     fflush(stderr);
     return EC_E_NOERROR;
 }
